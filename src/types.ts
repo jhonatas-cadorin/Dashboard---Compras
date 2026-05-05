@@ -3,8 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+export type AppMode = 'purchases' | 'sales' | 'missing_items';
+
 export interface PurchaseRecord {
   mes: number;
+  ano: number;
   filial: string;
   parceiro: string;
   nf: string;
@@ -15,20 +18,54 @@ export interface PurchaseRecord {
   total: number;
 }
 
+export interface InventoryRecord {
+  cod: string;
+  desc: string;
+  grupo: string;
+  fab: string;
+  filial: string;
+  un: string;
+  saldo: number;
+  meses: number[];
+  total_mov: number;
+  media: number;
+  cobertura: number;
+  meses_com_mov: number;
+  mov3: number;
+  curva: string;
+  criterio: string;
+  sugestao: number;
+  t1: number;
+  t2: number;
+  t3: number;
+  t4: number;
+}
+
 export interface DashboardData {
-  records: PurchaseRecord[];
-  kpis: {
+  mode: AppMode;
+  filename: string;
+  rowCount: number;
+  filiais: string[];
+  
+  // For Purchases/Sales
+  records?: PurchaseRecord[];
+  kpis?: {
     totalGeral: number;
     numParceiros: number;
     numNFs: number;
     numItens: number;
+    deltaTotal?: number;
+    deltaPartners?: number;
+    deltaNFs?: number;
   };
-  filiais: string[];
-  partners: string[];
-  globalMonthly: { name: string; value: number }[];
-  filialTotals: Record<string, number>;
-  filialMonthly: Record<string, { name: string; value: number }[]>;
-  topPartners: { name: string; value: number }[];
-  filename: string;
-  rowCount: number;
+  latestMonth?: number;
+  partners?: string[];
+  globalMonthly?: { name: string; value: number }[];
+  filialTotals?: Record<string, number>;
+  filialMonthly?: Record<string, { name: string; value: number }[]>;
+  topPartners?: { name: string; value: number }[];
+
+  // For Missing Items
+  inventoryRecords?: InventoryRecord[];
+  groups?: string[];
 }
