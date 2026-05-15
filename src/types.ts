@@ -10,6 +10,8 @@ export interface PurchaseRecord {
   ano: number;
   filial: string;
   parceiro: string;
+  grupo?: string;
+  fab?: string;
   nf: string;
   codItem: string;
   itemDesc: string;
@@ -35,6 +37,11 @@ export interface InventoryRecord {
   curva: string;
   criterio: string;
   sugestao: number;
+  custo: number;
+  preco: number;
+  valor_ruptura: number;
+  capital_parado: number;
+  saldoTransferivel: number;
   t1: number;
   t2: number;
   t3: number;
@@ -68,4 +75,5 @@ export interface DashboardData {
   // For Missing Items
   inventoryRecords?: InventoryRecord[];
   groups?: string[];
+  fabs?: string[];
 }

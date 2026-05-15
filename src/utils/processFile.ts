@@ -45,6 +45,9 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
     saldo_inicial: -1,
     un: -1,
     fab: -1,
+    custo: -1,
+    preco: -1,
+    lead_time: -1,
     months: []
   };
 
@@ -87,7 +90,10 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
         if (c.includes('total mov')) colIdx.total_mov = idx;
         if (c.includes('saldo anterior') || c.includes('estoque inicial') || c.includes('est. inicial') || c.includes('ant.')) colIdx.saldo_inicial = idx;
         if (c.includes('unidade de medida') || c === 'un' || c === 'um' || c.includes('unid')) colIdx.un = idx;
-        if (c.includes('fabricante') || c.includes('fornecedor') || c.includes('marca')) colIdx.fab = idx;
+        if (c === 'nome do fabricante' || (colIdx.fab === -1 && (c.includes('fabricante') || c.includes('fornecedor') || c.includes('marca')))) colIdx.fab = idx;
+        if (c.includes('custo') || c === 'vlr custo' || c === 'unit cost') colIdx.custo = idx;
+        if (c.includes('preço') || c.includes('preco') || c === 'vlr unit' || c === 'unit price' || c === 'vlr venda') colIdx.preco = idx;
+        if (c.includes('lead time') || c.includes('leadtime') || c.includes('prazo') || c.includes('entrega')) colIdx.lead_time = idx;
 
         // Monthly detection (prioritize specific order if possible)
         const monthMatch = monthNames.findIndex(m => c === m || c.startsWith(m + '/'));
@@ -114,18 +120,22 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
   }
 
   // Data parsing
-  const normalizeCrit = (s: string, coverage: number, totalMov: number) => {
+  const normalizeCrit = (s: string, saldo: number, totalMov: number, coverage: number) => {
     const norm = s.normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "")
       .toUpperCase()
       .replace(/\s+/g, '_');
     
-    if (norm.includes('URGENTE') || (totalMov > 0 && coverage <= 0.5)) return 'URGENTE';
-    if (norm.includes('COMPRAR_JA') || (totalMov > 0 && coverage <= 1.0)) return 'COMPRAR_JA';
-    if (norm.includes('COMPRAR_BREVE') || (totalMov > 0 && coverage <= 2.0)) return 'COMPRAR_BREVE';
-    if (norm.includes('ESTOQUE_ALTO') || (totalMov > 0 && coverage > 6.0)) return 'ESTOQUE_ALTO';
-    if (norm.includes('OK') || norm.includes('NORMAL')) return 'OK';
-    if (norm.includes('SEM_GIRO') || norm.includes('SEM_MOVIMENTO') || totalMov <= 0) return 'SEM_MOVIMENTO';
+    // User requested hierarchy: Ruptura, Excesso, Sem Giro
+    if (totalMov === 0) return 'SEM_MOVIMENTO'; // Sem Movimento (12 meses)
+    if (saldo <= 0 && totalMov > 0) return 'URGENTE'; // Ruptura
+    if (saldo > totalMov) return 'ESTOQUE_ALTO'; // Excesso (Transferível)
+    
+    // Secondary statuses
+    if (totalMov > 0 && coverage <= 1.0) return 'COMPRAR_JA'; // Crítico/Reposição
+    if (totalMov > 0 && coverage <= 2.0) return 'COMPRAR_BREVE'; // Preventivo
+    if (norm.includes('OK') || norm.includes('NORMAL') || (totalMov > 0 && coverage > 2.0)) return 'OK'; // Saudável
+    
     return norm || 'OK';
   };
 
@@ -150,6 +160,16 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
     const t3 = monthVals.slice(6, 9).reduce((a, b) => a + b, 0);
     const t4 = monthVals.slice(9, 12).reduce((a, b) => a + b, 0);
 
+    const custo = colIdx.custo >= 0 ? parseBrazilianNumber(rawRow[colIdx.custo]) : 0;
+    const preco = colIdx.preco >= 0 ? parseBrazilianNumber(rawRow[colIdx.preco]) : 0;
+    
+    // User requested financial logic
+    const valor_ruptura = (saldo <= 0 && total_mov > 0) ? (total_mov / 12) * (preco || custo || 0) : 0;
+    const isExcesso = saldo > total_mov && total_mov >= 0;
+    const isSemGiro = total_mov === 0 && saldo > 0;
+    const capital_parado = (isExcesso || isSemGiro) ? saldo * (custo || preco || 0) : 0;
+    const saldoTransferivel = Math.max(0, saldo - total_mov);
+
     const record = {
       cod,
       desc: String(rawRow[colIdx.desc] || '').trim(),
@@ -158,8 +178,14 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
       grupo: String(rawRow[colIdx.grupo] || 'OUTROS').trim().toUpperCase(),
       saldo,
       media,
+      custo,
+      preco,
+      valor_ruptura: Math.max(0, valor_ruptura),
+      capital_parado: Math.max(0, capital_parado),
+      saldoTransferivel,
+      lead_time: colIdx.lead_time >= 0 ? parseBrazilianNumber(rawRow[colIdx.lead_time]) : 30, // Default 30 days
       cobertura: colIdx.cobertura >= 0 ? parseBrazilianNumber(rawRow[colIdx.cobertura]) : coverage,
-      criterio: normalizeCrit(String(rawRow[colIdx.criterio] || ''), coverage, total_mov),
+      criterio: normalizeCrit(String(rawRow[colIdx.criterio] || ''), saldo, total_mov, coverage),
       sugestao: colIdx.sugestao >= 0 ? parseBrazilianNumber(rawRow[colIdx.sugestao]) : Math.max(0, (media * 2) - saldo),
       saldo_inicial: colIdx.saldo_inicial >= 0 ? parseBrazilianNumber(rawRow[colIdx.saldo_inicial]) : null,
       total_mov,
@@ -193,74 +219,90 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
 
   const filiais = [...new Set(inventoryRecords.map(r => r.filial))].sort();
   const groups = [...new Set(inventoryRecords.map(r => r.grupo))].sort();
-
+  const fabs = [...new Set(inventoryRecords.map(r => r.fab))].sort();
+  
   return {
     mode: 'missing_items',
     filename: file.name,
     rowCount: inventoryRecords.length,
     filiais,
     groups,
+    fabs,
     inventoryRecords
   };
 }
 
 export async function processFile(file: File, mode: AppMode): Promise<DashboardData> {
   const ab = await file.arrayBuffer();
-  // Use raw: false and dateNF to get visual strings from Excel
   const wb = XLSX.read(ab, { type: 'array', cellDates: true, raw: false });
   
-  let sheetData: any[][] | null = null;
+  let inventorySheet: any[][] | null = null;
+  let transactionSheet: any[][] | null = null;
+  let activeSheetName = '';
+
   for (const name of wb.SheetNames) {
     const ws = wb.Sheets[name];
     const raw = XLSX.utils.sheet_to_json<any[]>(ws, { header: 1, defval: null });
-    
-    // Check if this sheet has the expected columns for the current mode
     const textContent = raw.slice(0, 20).flat().map(v => String(v || '').toLowerCase());
     
-    if (mode === 'missing_items') {
-      const hasInventoryKeywords = textContent.some(t => 
-        t.includes('código') || t.includes('codigo') || t === 'cod' || t === 'cód' || 
-        t.includes('descrição') || t.includes('descricao') || t.includes('cobertura') || t.includes('sugestão') ||
-        t.includes('nº do item') || t.includes('descrição do item')
-      );
-      if (hasInventoryKeywords) {
-        sheetData = raw;
-        break;
-      }
-    } else {
-      const hasTransactionKeywords = textContent.some(t => 
-        t.includes('tp doc') || t.includes('parceiro') || t.includes('nº doc') || 
-        t.includes('valor liq') || t.includes('vlr liq') || t.includes('nota fiscal')
-      );
-      if (hasTransactionKeywords) {
-        sheetData = raw;
-        break;
-      }
+    const hasInventoryKeywords = textContent.some(t => 
+      t.includes('código') || t.includes('codigo') || t === 'cod' || t === 'cód' || 
+      t.includes('descrição') || t.includes('descricao') || t.includes('cobertura') || t.includes('sugestão') ||
+      t.includes('nº do item') || t.includes('descrição do item')
+    );
+
+    const hasTransactionKeywords = textContent.some(t => 
+      t.includes('tp doc') || t.includes('parceiro') || t.includes('nº doc') || 
+      t.includes('valor liq') || t.includes('vlr liq') || t.includes('nota fiscal')
+    );
+
+    if (hasInventoryKeywords && !inventorySheet) {
+      inventorySheet = raw;
+      if (mode === 'missing_items') activeSheetName = name;
+    }
+    if (hasTransactionKeywords && !transactionSheet) {
+      transactionSheet = raw;
+      if (mode !== 'missing_items') activeSheetName = name;
     }
   }
 
-  // Fallback to first sheet with some data if no keywords found
-  if (!sheetData) {
-    for (const name of wb.SheetNames) {
-      const raw = XLSX.utils.sheet_to_json<any[]>(wb.Sheets[name], { header: 1, defval: null });
-      if (raw.filter(r => r && r.some(c => c !== null)).length > 5) {
-        sheetData = raw;
-        break;
-      }
-    }
+  // Fallback
+  if (!inventorySheet && !transactionSheet) {
+    const firstSheet = XLSX.utils.sheet_to_json<any[]>(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: null });
+    transactionSheet = firstSheet; // Default to transaction if unknown
   }
 
-  if (!sheetData) throw new Error('Não foi possível encontrar uma aba com dados válidos na planilha.');
+  const result: DashboardData = {
+    filename: file.name,
+    rowCount: 0,
+    filiais: [],
+    groups: [],
+    mode: mode
+  };
 
-  if (mode === 'missing_items') {
-    return processInventoryFile(file, sheetData);
+  if (transactionSheet) {
+    const transactionData = await processTransactionData(file, transactionSheet, mode);
+    Object.assign(result, transactionData);
   }
 
+  if (inventorySheet) {
+    const inventoryData = await processInventoryFile(file, inventorySheet);
+    result.inventoryRecords = inventoryData.inventoryRecords;
+    result.fabs = inventoryData.fabs;
+    if (!result.groups || result.groups.length === 0) result.groups = inventoryData.groups;
+    if (!result.filiais || result.filiais.length === 0) result.filiais = inventoryData.filiais;
+  }
+
+  result.rowCount = (result.records?.length || 0) + (result.inventoryRecords?.length || 0);
+  return result;
+}
+
+async function processTransactionData(file: File, sheetData: any[][], mode: AppMode): Promise<Partial<DashboardData>> {
   const records: PurchaseRecord[] = [];
   let curFilial = 'GERAL';
   let curParceiro = 'NÃO INFORMADO';
+  let curGrupo = 'OUTROS';
 
-  // Dynamic Column Mapping with fallback
   let colIdx = {
     date: 0,
     type: 3,
@@ -269,36 +311,50 @@ export async function processFile(file: File, mode: AppMode): Promise<DashboardD
     desc: 11,
     un: 16,
     qty: 18,
-    total: 19
+    total: 19,
+    grupo: -1,
+    parceiro: -1,
+    filial: -1,
+    fab: -1
   };
 
-  // Header detection phase
   for (const rawRow of sheetData) {
     const rowStr = rawRow.map(v => v === null ? '' : String(v).trim().toLowerCase());
-    
-    // Check if this looks like a header row
-    if (rowStr.includes('data') && (rowStr.includes('tp doc') || rowStr.includes('tipo'))) {
+    if ((rowStr.includes('data') || rowStr.some(s => s.includes('vencimento') || s.includes('lançamento'))) && 
+        (rowStr.includes('tp doc') || rowStr.includes('tipo') || rowStr.some(s => s.includes('parceiro') || s.includes('cliente') || s.includes('fornecedor') || s.includes('nº doc/nf')))) {
       rowStr.forEach((cell, idx) => {
-        if (cell.includes('data')) colIdx.date = idx;
-        if (cell.includes('tp doc') || cell.includes('tipo')) colIdx.type = idx;
-        if (cell.includes('nº doc/nf') || cell.includes('nº doc')) colIdx.nf = idx;
-        if (cell.includes('cód. item') || cell.includes('nº do item') || cell.includes('item')) colIdx.code = idx;
-        if (cell.includes('descrição')) colIdx.desc = idx;
-        if (cell.includes('un')) colIdx.un = idx;
-        if (cell.includes('quantidade') || cell.includes('qtde')) colIdx.qty = idx;
-        if (cell.includes('total')) colIdx.total = idx;
+        const c = cell.toLowerCase().trim();
+        if (c.includes('data') || c.includes('lançamento')) colIdx.date = idx;
+        if (c.includes('tp doc') || c.includes('tipo')) colIdx.type = idx;
+        if (c === 'nº doc/nf' || c === 'n° doc/nf' || c === 'nº doc' || c === 'n° doc' || c.includes('nº doc') || c.includes('n° doc') || c.includes('doc/nf') || c.includes('nota fiscal') || c === 'nf') colIdx.nf = idx;
+        if (c.includes('grupo de item') || c.includes('família') || c.includes('familia') || c.includes('setor') || c.includes('categoria')) colIdx.grupo = idx;
+        if (c.includes('parceiro') || c.includes('fornecedor') || c.includes('cliente') || c === 'nome' || c.includes('razão social')) colIdx.parceiro = idx;
+        if (c.includes('filial') || c.includes('unidade') || c.includes('u.n') || c.includes('depósito')) colIdx.filial = idx;
+        if (c.includes('fabricante') || c.includes('fornecedor') || c.includes('marca') || c === 'fab') colIdx.fab = idx;
+        if (c === 'cod item' || c === 'código item' || c === 'codigo item' || c === 'cód. item' || c === 'cod. item' || c === 'cod_item' || c.match(/^c[oó]d\.?\s*item$/i)) {
+          colIdx.code = idx;
+        } else if (colIdx.code === 8 && (c.includes('cod') || c.includes('cód') || c === 'código' || c === 'codigo' || c === 'material' || c === 'sku')) {
+          colIdx.code = idx;
+        } else if (c === 'item' && colIdx.code === 8) {
+          colIdx.code = idx;
+        }
+
+        if (c.includes('descrição') || c.includes('descricao') || c === 'descr' || c === 'desc' || c.includes('item desc')) colIdx.desc = idx;
+        else if (c === 'item' && colIdx.desc === 11) colIdx.desc = idx;
+        if (c.includes('un')) colIdx.un = idx;
+        if (c.includes('quantidade') || c.includes('qtde') || c === 'qtd') colIdx.qty = idx;
+        if (c.includes('total') || c.includes('valor liq') || c.includes('vlr liq') || c.includes('líquido') || c.includes('liquido')) colIdx.total = idx;
       });
-      break; // Found headers, stop looking
+      break; 
     }
   }
 
   for (const rawRow of sheetData) {
     if (!rawRow || rawRow.length === 0) continue;
-    
     const rowStr = rawRow.map(v => v === null ? '' : String(v).trim());
     const line = rowStr.join(' ');
-
-    // Hierarchy Detection
+    
+    // Header detection for Filial/Parceiro/Grupo (for spreadsheets that group data)
     if (/filial\s*:/i.test(line)) {
       for (const v of rowStr) {
         if (/filial\s*:/i.test(v)) {
@@ -309,7 +365,6 @@ export async function processFile(file: File, mode: AppMode): Promise<DashboardD
       }
       continue;
     }
-
     if (/parceiro\s+de\s+neg/i.test(line)) {
       for (const v of rowStr) {
         if (/parceiro\s+de\s+neg/i.test(v)) {
@@ -320,60 +375,57 @@ export async function processFile(file: File, mode: AppMode): Promise<DashboardD
       }
       continue;
     }
-
-    // Try to detect index shift if we see a header
-    if (/\bdata\b/i.test(line) && /tp\s*doc/i.test(line)) {
-      // We found the header row, we could map columns here if needed
-      // But we stick to established patterns unless we want full flexible mapping
+    if (/grupo\s+de\s+item\s*:/i.test(line) || /familia\s*:/i.test(line) || /família\s*:/i.test(line)) {
+      for (const v of rowStr) {
+        if (/grupo\s+de\s+item\s*:/i.test(v) || /familia\s*:/i.test(v) || /família\s*:/i.test(v)) {
+          const nome = v.replace(/.*[:]/, '').trim().toUpperCase();
+          if (nome) curGrupo = nome;
+          break;
+        }
+      }
       continue;
     }
 
-    // Date parsing
     const rawDate = rawRow[colIdx.date];
     let mes: number | null = null;
     let ano: number = new Date().getFullYear();
-    
-    // Improved Date Parsing
     if (rawDate instanceof Date && !isNaN(rawDate.getTime())) {
       mes = rawDate.getUTCMonth() + 1;
       ano = rawDate.getUTCFullYear();
-    } else if (typeof rawDate === 'string') {
-      const matchIso = rawDate.match(/^(\d{4})-(\d{2})-(\d{2})/);
-      const matchBr = rawDate.match(/^(\d{2})[/-](\d{2})[/-](\d{4})/);
-      
-      if (matchIso) {
-        mes = parseInt(matchIso[2], 10);
-        ano = parseInt(matchIso[1], 10);
-      } else if (matchBr) {
+    } else if (typeof rawDate === 'string' && rawDate.trim() !== '') {
+      const s = rawDate.trim();
+      const matchBr = s.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/);
+      if (matchBr) {
         mes = parseInt(matchBr[2], 10);
-        ano = parseInt(matchBr[3], 10);
+        let a = parseInt(matchBr[3], 10);
+        if (a < 100) a += 2000;
+        ano = a;
       }
-    } else if (typeof rawDate === 'number' && rawDate > 30000) {
+    } else if (typeof rawDate === 'number' && rawDate > 1000) {
       const d = new Date(Math.round((rawDate - 25569) * 86400 * 1000));
       mes = d.getUTCMonth() + 1;
       ano = d.getUTCFullYear();
     }
 
     if (!mes || mes < 1 || mes > 12) continue;
-
-    // Filter Logic: Must have an NF number OR include NF in the type
     const nfVal = String(rawRow[colIdx.nf] ?? '').trim();
     const tipo = String(rawRow[colIdx.type] || '').toUpperCase();
-    
-    const hasNfNumber = nfVal.length > 0 && /^\d+/.test(nfVal);
-    const isNfType = tipo.includes('NF');
-
-    if (!hasNfNumber && !isNfType) continue;
+    if (nfVal.length === 0 && !tipo.includes('NF')) continue;
 
     const total = parseBrazilianNumber(rawRow[colIdx.total]);
-    if (total === 0) continue; // Skip zero total rows (headers or footers)
+    if (total === 0) continue;
+
+    // Use column-based Filial/Parceiro if detected
+    const itemFilial = colIdx.filial >= 0 ? String(rawRow[colIdx.filial] || '').trim().toUpperCase() : curFilial;
+    const itemParceiro = colIdx.parceiro >= 0 ? String(rawRow[colIdx.parceiro] || '').trim().toUpperCase() : curParceiro;
 
     records.push({
-      mes,
-      ano,
-      filial: curFilial,
-      parceiro: curParceiro,
-      nf: String(rawRow[colIdx.nf] ?? '').trim(),
+      mes, ano,
+      filial: itemFilial || curFilial,
+      parceiro: itemParceiro || curParceiro,
+      grupo: colIdx.grupo >= 0 ? (String(rawRow[colIdx.grupo] || '').trim().toUpperCase() || curGrupo) : curGrupo,
+      fab: colIdx.fab >= 0 ? String(rawRow[colIdx.fab] || '').trim().toUpperCase() : 'N/I',
+      nf: nfVal,
       codItem: String(rawRow[colIdx.code] ?? '').trim(),
       itemDesc: String(rawRow[colIdx.desc] ?? '').trim(),
       un: String(rawRow[colIdx.un] ?? '').trim(),
@@ -382,62 +434,39 @@ export async function processFile(file: File, mode: AppMode): Promise<DashboardD
     });
   }
 
-  if (records.length === 0) {
-    throw new Error('Nenhum registro de Nota Fiscal (NF) válido foi encontrado. Verifique se a planilha segue o padrão do relatório SBO / ERP.');
-  }
+  if (records.length === 0) return {};
 
-  // Final aggregations
   const totalGeral = records.reduce((acc, r) => acc + r.total, 0);
   const filiais = [...new Set(records.map(r => r.filial))].sort();
   const partners = [...new Set(records.map(r => r.parceiro))].sort();
-  const numNFs = [...new Set(records.map(r => r.nf))].length;
+  const groups = [...new Set(records.map(r => r.grupo || 'OUTROS'))].sort();
+  const numNFs = [...new Set(records.map(r => `${r.nf}|${r.parceiro}`))].length;
   const numItens = [...new Set(records.map(r => r.codItem))].length;
-
   const globalMonthly = MONTH_NAMES.map((name, i) => ({
     name,
     value: Math.round(records.filter(r => r.mes === i + 1).reduce((acc, r) => acc + r.total, 0) * 100) / 100
   }));
 
   const filialTotals: Record<string, number> = {};
-  const filialMonthly: Record<string, { name: string; value: number }[]> = {};
   filiais.forEach(f => {
-    const sub = records.filter(r => r.filial === f);
-    filialTotals[f] = Math.round(sub.reduce((acc, r) => acc + r.total, 0) * 100) / 100;
-    filialMonthly[f] = MONTH_NAMES.map((name, i) => ({
-      name,
-      value: Math.round(sub.filter(r => r.mes === i + 1).reduce((acc, r) => acc + r.total, 0) * 100) / 100
-    }));
+    filialTotals[f] = Math.round(records.filter(r => r.filial === f).reduce((acc, r) => acc + r.total, 0) * 100) / 100;
   });
 
   const partnerAgg: Record<string, number> = {};
-  records.forEach(r => {
-    partnerAgg[r.parceiro] = (partnerAgg[r.parceiro] || 0) + r.total;
-  });
-  const topPartners = Object.entries(partnerAgg)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 15)
-    .map(([name, value]) => ({ name: name.trim(), value: Math.round(value * 100) / 100 }));
-
-  const latestMonth = records.length > 0 ? Math.max(...records.map(r => r.mes)) : 1;
+  records.forEach(r => { partnerAgg[r.parceiro] = (partnerAgg[r.parceiro] || 0) + r.total; });
+  const topPartners = Object.entries(partnerAgg).sort((a, b) => b[1] - a[1]).slice(0, 15).map(([name, value]) => ({ name: name.trim(), value: Math.round(value * 100) / 100 }));
+  const latestMonth = Math.max(...records.map(r => r.mes));
 
   return {
-    mode,
     records,
-    kpis: {
-      totalGeral: Math.round(totalGeral * 100) / 100,
-      numParceiros: partners.length,
-      numNFs,
-      numItens
-    },
+    kpis: { totalGeral, numParceiros: partners.length, numNFs, numItens },
     latestMonth,
     filiais,
     partners,
+    groups,
     globalMonthly,
     filialTotals,
-    filialMonthly,
-    topPartners,
-    filename: file.name,
-    rowCount: records.length
+    topPartners
   };
 }
 
