@@ -150,6 +150,29 @@ function ItemDetailModal({
     { label: 'Cobertura', value: (item.cobertura || 0).toFixed(1), sub: 'meses', icon: Cpu, color: (item.cobertura || 0) < 1 ? 'text-brand-red' : 'text-brand-green' },
   ];
 
+  const [recommendation, setRecommendation] = useState<string>(item.recommendation || 'Gerando recomendação inteligente...');
+  const [loadingAI, setLoadingAI] = useState(false);
+
+  useEffect(() => {
+    if (!item.recommendation && !loadingAI) {
+      setLoadingAI(true);
+      fetch('/api/ai/recommendation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ item })
+      })
+      .then(res => res.json())
+      .then(data => {
+        setRecommendation(data.recommendation || 'Não foi possível gerar uma recomendação no momento.');
+      })
+      .catch(err => {
+        console.error('AI Fetch Error:', err);
+        setRecommendation('Erro ao conectar com o serviço de IA.');
+      })
+      .finally(() => setLoadingAI(false));
+    }
+  }, [item]);
+
   return (
     <div 
       className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 dark:bg-black/80 backdrop-blur-md" 
@@ -305,14 +328,14 @@ function ItemDetailModal({
              </div>
              <div className="flex items-start gap-4 relative z-10">
                 <div className="w-10 h-10 bg-brand-blue/5 rounded-xl flex items-center justify-center shrink-0 border border-brand-blue/20">
-                  <ShieldCheck className="w-5 h-5 text-brand-blue" />
+                  {loadingAI ? <RefreshCw className="w-5 h-5 text-brand-blue animate-spin" /> : <ShieldCheck className="w-5 h-5 text-brand-blue" />}
                 </div>
                 <div>
                   <h4 className="text-[8px] font-black text-brand-blue uppercase tracking-[0.2em] font-mono mb-1.5 flex items-center gap-1.5">
                     <Cpu className="w-3 h-3" /> ESTRATÉGIA RECOMENDADA
                   </h4>
-                  <p className="text-sm font-medium text-brand-text-primary italic leading-snug opacity-90">
-                    "{item.recommendation}"
+                  <p className={`text-sm font-medium text-brand-text-primary italic leading-snug transition-opacity duration-500 ${loadingAI ? 'opacity-40' : 'opacity-90'}`}>
+                    "{recommendation}"
                   </p>
                 </div>
              </div>

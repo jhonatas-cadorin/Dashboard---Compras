@@ -2,5 +2,7 @@
   "name": "Dashboard de Compras ERP",
   "description": "Um dashboard analítico para processamento de planilhas de compras de ERP, com filtragem de filiais e fornecedores, análise de Pareto e evolução mensal.",
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
