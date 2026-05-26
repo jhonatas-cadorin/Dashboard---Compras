@@ -9,6 +9,15 @@ const LoginPage: React.FC = () => {
   const [password, setPassword] = useState('');
   const [errorInput, setErrorInput] = useState<string | null>(null);
   const [loginLoading, setLoginLoading] = useState(false);
+  const [unauthorizedDomainError, setUnauthorizedDomainError] = useState(false);
+  const [currentDomain, setCurrentDomain] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  React.useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setCurrentDomain(window.location.hostname);
+    }
+  }, []);
 
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -17,6 +26,7 @@ const LoginPage: React.FC = () => {
       return;
     }
     setErrorInput(null);
+    setUnauthorizedDomainError(false);
     setLoginLoading(true);
     try {
       await loginWithEmailAndPassword(email, password);
@@ -29,12 +39,22 @@ const LoginPage: React.FC = () => {
 
   const handleGoogleLogin = async () => {
     setErrorInput(null);
+    setUnauthorizedDomainError(false);
     setLoginLoading(true);
     try {
       await loginWithGoogle();
     } catch (err: any) {
       console.error(err);
-      setErrorInput(err?.message || "Erro ao realizar login via Google. Apenas o Admin Master possui permissão.");
+      const isDomainError = 
+        err?.code === 'auth/unauthorized-domain' || 
+        err?.message?.includes('unauthorized-domain') ||
+        err?.message?.includes('auth/unauthorized-domain');
+      
+      if (isDomainError) {
+        setUnauthorizedDomainError(true);
+      } else {
+        setErrorInput(err?.message || "Erro ao realizar login via Google. Apenas o Admin Master possui permissão.");
+      }
     } finally {
       setLoginLoading(false);
     }
@@ -84,6 +104,49 @@ const LoginPage: React.FC = () => {
             className="mb-4 p-3 bg-red-500/10 border border-red-500/20 text-red-600 dark:text-red-400 rounded-xl text-xs font-semibold text-center"
           >
             {errorInput}
+          </motion.div>
+        )}
+
+        {unauthorizedDomainError && (
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="mb-6 p-4 bg-red-500/10 border border-red-500/20 text-red-600 dark:text-red-400 rounded-2xl text-xs text-left"
+          >
+            <div className="font-bold flex items-center gap-2 mb-2 text-red-700 dark:text-red-400">
+              <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse inline-block"></span>
+              Domínio Não Autorizado no Firebase
+            </div>
+            <p className="text-[11px] leading-relaxed mb-3 text-zinc-600 dark:text-zinc-300">
+              O Firebase Auth exige registrar os domínios da aplicação para permitir conexões OAuth do Google.
+            </p>
+            <div className="space-y-2 mt-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-700 dark:text-zinc-300">
+                Como corrigir no Console do Firebase:
+              </p>
+              <ol className="list-decimal list-inside pl-1 text-[11px] text-zinc-600 dark:text-zinc-400 space-y-1">
+                <li>Acesse o <strong>Firebase Console</strong> do seu projeto.</li>
+                <li>Vá em <strong>Authentication</strong> &gt; <strong>Settings</strong> &gt; <strong>Authorized domains</strong>.</li>
+                <li>Clique em <strong>Add domain</strong> e adicione o domínio abaixo:</li>
+              </ol>
+              
+              <div 
+                className="mt-3 p-2 bg-gray-50 dark:bg-zinc-800 rounded-xl border border-gray-100 dark:border-zinc-700 font-mono text-[10px] select-all break-all cursor-pointer hover:bg-gray-100 dark:hover:bg-zinc-700 transition-colors flex justify-between items-center group"
+                onClick={() => {
+                  navigator.clipboard.writeText(currentDomain);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 2000);
+                }}
+              >
+                <span className="text-brand-blue font-bold">{currentDomain}</span>
+                <span className="text-[9px] bg-brand-blue/10 text-brand-blue px-1.5 py-0.5 rounded font-sans uppercase group-hover:bg-brand-blue group-hover:text-white transition-all">
+                  {copied ? 'Copiado!' : 'Copiar'}
+                </span>
+              </div>
+              <p className="text-[9px] text-zinc-500 dark:text-zinc-400 mt-1 font-sans italic text-center">
+                Dica: Clique no domínio acima para copiá-lo automaticamente.
+              </p>
+            </div>
           </motion.div>
         )}
 
