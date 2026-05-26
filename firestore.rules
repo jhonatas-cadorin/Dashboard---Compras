@@ -43,13 +43,17 @@ service cloud.firestore {
 
     function isValidUser(data) {
       return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'status', 'permissions', 'createdAt'])
-        && data.keys().size() == 7
-        && data.uid == request.auth.uid
-        && data.email == request.auth.token.email
+        && (data.keys().size() == 7 || (data.keys().size() == 8 && data.get('password', '') is string))
+        && data.uid is string
+        && data.uid.size() <= 128
+        && data.email is string
+        && data.email.size() <= 200
+        && data.displayName is string
+        && data.displayName.size() <= 200
         && data.role in ['Admin Master', 'Editor', 'Viewer', 'User']
         && data.status in ['Active', 'Inactive']
         && data.permissions is list
-        && data.createdAt == request.time;
+        && (data.createdAt == request.time || data.createdAt is timestamp);
     }
 
     function isSystemConfigInitialized() {
@@ -65,12 +69,14 @@ service cloud.firestore {
       
       allow create: if isSignedIn() 
         && isValidId(userId) 
-        && userId == request.auth.uid 
         && isValidUser(incoming())
         && (
-          // Allow first user to be Admin Master if system not initialized
-          (!exists(/databases/$(database)/documents/system_config/settings) && incoming().role == 'Admin Master')
-          || (isSystemConfigInitialized() && incoming().role == 'Viewer')
+          // Case 1: First user initialized as Admin Master (system register)
+          (!exists(/databases/$(database)/documents/system_config/settings) && userId == request.auth.uid && incoming().uid == request.auth.uid && incoming().role == 'Admin Master')
+          // Case 2: User creating themselves (default option if logging in or offline registration)
+          || (userId == request.auth.uid && incoming().uid == request.auth.uid && incoming().email == request.auth.token.email)
+          // Case 3: Admin Master creating a user document
+          || (isAdmin() && incoming().uid == userId)
         );
 
       allow update: if isSignedIn()

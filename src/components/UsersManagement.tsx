@@ -1,9 +1,56 @@
 import React, { useState, useEffect } from 'react';
-import { db } from '../lib/firebase';
+import { db, auth } from '../lib/firebase';
 import { collection, getDocs, doc, setDoc, updateDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
 import { User, Shield, ShieldAlert, Trash2, Edit2, Check, X, Search, Filter, LogOut, UserPlus, Key, Eye, EyeOff } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAuth } from '../lib/AuthContext';
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 interface UserProfile {
   uid: string;
@@ -39,12 +86,14 @@ export const UsersManagement: React.FC = () => {
 
   const fetchUsers = async () => {
     setLoading(true);
+    const path = 'users';
     try {
-      const querySnapshot = await getDocs(collection(db, 'users'));
+      const querySnapshot = await getDocs(collection(db, path));
       const usersData = querySnapshot.docs.map(doc => doc.data() as UserProfile);
       setUsers(usersData);
     } catch (error) {
       console.error("Error fetching users:", error);
+      handleFirestoreError(error, OperationType.GET, path);
     } finally {
       setLoading(false);
     }
@@ -55,6 +104,7 @@ export const UsersManagement: React.FC = () => {
   }, []);
 
   const handleUpdate = async (uid: string) => {
+    const path = `users/${uid}`;
     try {
       const userRef = doc(db, 'users', uid);
       const updateData: any = {
@@ -74,6 +124,7 @@ export const UsersManagement: React.FC = () => {
     } catch (error) {
       console.error("Error updating user:", error);
       alert("Erro ao atualizar usuário. Verifique suas permissões.");
+      handleFirestoreError(error, OperationType.WRITE, path);
     }
   };
 
@@ -84,12 +135,14 @@ export const UsersManagement: React.FC = () => {
     }
     if (!confirm("Tem certeza que deseja excluir este usuário?")) return;
     
+    const path = `users/${uid}`;
     try {
       await deleteDoc(doc(db, 'users', uid));
       fetchUsers();
     } catch (error) {
       console.error("Error deleting user:", error);
       alert("Erro ao excluir usuário.");
+      handleFirestoreError(error, OperationType.DELETE, path);
     }
   };
 
@@ -100,8 +153,8 @@ export const UsersManagement: React.FC = () => {
       return;
     }
     setIsCreating(true);
+    const usersRef = collection(db, 'users');
     try {
-      const usersRef = collection(db, 'users');
       // Verify duplicate
       const querySnapshot = await getDocs(usersRef);
       const emailExists = querySnapshot.docs.some(doc => {
@@ -139,6 +192,7 @@ export const UsersManagement: React.FC = () => {
     } catch (error: any) {
       console.error("Error creating user:", error);
       alert("Erro ao registrar usuário no Firestore: " + error.message);
+      handleFirestoreError(error, OperationType.WRITE, 'users');
     } finally {
       setIsCreating(false);
     }
