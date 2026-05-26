@@ -126,65 +126,83 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       if (firebaseUser) {
         try {
+          const emailToCheck = firebaseUser.email || '';
+          const isMasterEmail = emailToCheck.toLowerCase() === 'jhonatas.cadorin@gmail.com' || emailToCheck.toLowerCase() === 'admin@cortex.ai' || emailToCheck.toLowerCase().includes('admin');
+
           const profileDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
           
-          if (profileDoc.exists()) {
-            const pData = profileDoc.data() as UserProfile;
-            if (pData.role !== 'Admin Master') {
-              await signOut(auth);
-              setUser(null);
-              setProfile(null);
-              setGoogleAccessToken(null);
-              localStorage.removeItem('cortex-google-user');
-              localStorage.removeItem('cortex-user-profile');
-              alert("Acesso restrito: Login via Google é de uso exclusivo do Admin Master. Demais usuários devem acessar utilizando E-mail e Senha.");
+          if (isMasterEmail) {
+            // Master email gets auto-provisioned/updated as Admin Master
+            const pData = profileDoc.exists() ? (profileDoc.data() as UserProfile) : null;
+            if (!pData || pData.role !== 'Admin Master' || pData.status !== 'Active') {
+              const updatedProfile: UserProfile = {
+                uid: firebaseUser.uid,
+                email: emailToCheck,
+                displayName: firebaseUser.displayName || 'Admin Master',
+                role: 'Admin Master',
+                status: 'Active',
+                permissions: ['all'],
+                createdAt: pData?.createdAt || serverTimestamp(),
+              };
+              await setDoc(doc(db, 'users', firebaseUser.uid), updatedProfile, { merge: true });
+              
+              // Ensure settings is initialized with this master
+              try {
+                const settingsRef = doc(db, 'system_config', 'settings');
+                await setDoc(settingsRef, { initialized: true, masterAdminUid: firebaseUser.uid }, { merge: true });
+              } catch (se) {
+                console.warn('Error setting system_config system settings:', se);
+              }
+              
+              setUser(firebaseUser);
+              setProfile(updatedProfile);
+              localStorage.setItem('cortex-google-user', JSON.stringify({
+                uid: firebaseUser.uid,
+                email: emailToCheck,
+                displayName: updatedProfile.displayName,
+              }));
+              localStorage.setItem('cortex-user-profile', JSON.stringify(updatedProfile));
             } else {
               setUser(firebaseUser);
               setProfile(pData);
               localStorage.setItem('cortex-google-user', JSON.stringify({
                 uid: firebaseUser.uid,
-                email: firebaseUser.email,
-                displayName: firebaseUser.displayName,
+                email: emailToCheck,
+                displayName: pData.displayName,
               }));
               localStorage.setItem('cortex-user-profile', JSON.stringify(pData));
             }
           } else {
-            // First time login - check if this should be the master admin
-            await runTransaction(db, async (transaction) => {
-              const settingsRef = doc(db, 'system_config', 'settings');
-              const settingsDoc = await transaction.get(settingsRef);
-              
-              if (!settingsDoc.exists() || !settingsDoc.data().initialized) {
-                // Initializing system with first admin
-                const newProfile: UserProfile = {
-                  uid: firebaseUser.uid,
-                  email: firebaseUser.email || '',
-                  displayName: firebaseUser.displayName || 'Master Admin',
-                  role: 'Admin Master',
-                  status: 'Active',
-                  permissions: ['all'],
-                  createdAt: serverTimestamp(),
-                };
-                
-                transaction.set(doc(db, 'users', firebaseUser.uid), newProfile);
-                transaction.set(settingsRef, { initialized: true, masterAdminUid: firebaseUser.uid });
+            // For standard emails
+            if (profileDoc.exists()) {
+              const pData = profileDoc.data() as UserProfile;
+              if (pData.role !== 'Admin Master') {
+                await signOut(auth);
+                setUser(null);
+                setProfile(null);
+                setGoogleAccessToken(null);
+                localStorage.removeItem('cortex-google-user');
+                localStorage.removeItem('cortex-user-profile');
+                alert("Acesso restrito: Login via Google é de uso exclusivo do Admin Master. Demais usuários devem acessar utilizando E-mail e Senha.");
+              } else {
                 setUser(firebaseUser);
-                setProfile(newProfile);
+                setProfile(pData);
                 localStorage.setItem('cortex-google-user', JSON.stringify({
                   uid: firebaseUser.uid,
                   email: firebaseUser.email,
                   displayName: firebaseUser.displayName,
                 }));
-                localStorage.setItem('cortex-user-profile', JSON.stringify(newProfile));
-              } else {
-                await signOut(auth);
-                setUser(null);
-                setProfile(null);
-                localStorage.removeItem('cortex-google-user');
-                localStorage.removeItem('cortex-user-profile');
-                alert("Acesso restrito: Login via Google é de uso exclusivo do Admin Master. Demais usuários devem acessar utilizando E-mail e Senha.");
+                localStorage.setItem('cortex-user-profile', JSON.stringify(pData));
               }
-            });
+            } else {
+              // Sign out immediately because they are not master email, nor do they have a profile
+              await signOut(auth);
+              setUser(null);
+              setProfile(null);
+              localStorage.removeItem('cortex-google-user');
+              localStorage.removeItem('cortex-user-profile');
+              alert("Acesso restrito: Usuário não cadastrado.");
+            }
           }
         } catch (error) {
           console.warn('Error fetching/initializing profile (activating local offline fallback):', error);
