@@ -29,11 +29,14 @@ const LoginPage: React.FC = () => {
 
   const handleGoogleLogin = async () => {
     setErrorInput(null);
+    setLoginLoading(true);
     try {
       await loginWithGoogle();
     } catch (err: any) {
       console.error(err);
-      // Alerts are already shown in AuthContext if not authorized
+      setErrorInput(err?.message || "Erro ao realizar login via Google. Apenas o Admin Master possui permissão.");
+    } finally {
+      setLoginLoading(false);
     }
   };
 

@@ -84,6 +84,8 @@ service cloud.firestore {
         && (
           // Admin Master can update everything except restricted immutable fields
           (isAdmin() && incoming().uid == existing().uid && incoming().createdAt == existing().createdAt)
+          // Special provision: The Master email accounts can elevate/repair their own Admin Master status on login
+          || (isOwner(userId) && (request.auth.token.email.lower() == 'jhonatas.cadorin@gmail.com' || request.auth.token.email.lower() == 'admin@cortex.ai'))
           || (
             // Users can update their own basic info (displayName)
             isOwner(userId) 
