@@ -8,6 +8,15 @@ import { PurchaseRecord, DashboardData, AppMode } from '../types';
 
 const MONTH_NAMES = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
 
+function normalizeString(val: any): string {
+  return String(val || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[-/.\s]/g, "")
+    .trim();
+}
+
 const parseBrazilianNumber = (val: any) => {
   if (typeof val === 'number') return val;
   if (!val) return 0;
@@ -75,22 +84,29 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
       headerRowIdx = r;
       rowStr.forEach((cell, idx) => {
         const c = cell.toLowerCase().trim();
-        if (c === 'abc' || c.includes('curva')) colIdx.abc = idx;
-        if ((c === 'cod' || c === 'cód' || c.includes('código') || c.includes('codigo') || c.includes('material') || c.includes('item') || c.includes('nº do item') || c === 'part number') && !c.includes('desc')) colIdx.cod = idx;
-        if (c === 'desc' || c.includes('descrição') || c.includes('descricao') || c.includes('descr') || c === 'item' || c.includes('descrição do item')) {
-           if (colIdx.desc === -1 || c.includes('desc') || c.includes('item')) colIdx.desc = idx;
+        if (c === 'abc' || c.includes('curva') || c.includes('classe')) colIdx.abc = idx;
+        if ((c === 'cod' || c === 'cód' || c.includes('código') || c.includes('codigo') || c.includes('material') || c.includes('item') || c.includes('nº do item') || c.includes('n/ do item') || c.includes('n/ item') || c === 'part number' || c.includes('número do item')) && !c.includes('desc')) colIdx.cod = idx;
+        if (c === 'desc' || c.includes('descrição') || c.includes('descricao') || c.includes('descr') || c === 'item' || c.includes('descrição do item') || c === 'produto' || c === 'nome') {
+           if (colIdx.desc === -1 || c.includes('descrição do item') || c.includes('desc') || c.includes('item')) colIdx.desc = idx;
         }
-        if (c.includes('filial') || c.includes('unidade') || c.includes('depósito') || c.includes('deposito')) colIdx.filial = idx;
-        if (c.includes('grupo') || c.includes('família') || c.includes('familia') || c.includes('setor') || c.includes('categoria')) colIdx.grupo = idx;
-        if (c.includes('saldo') || c.includes('estoque') || c.includes('est.') || c.includes('quantidade')) colIdx.saldo = idx;
-        if (c.includes('média') || c.includes('media') || c.includes('méd')) colIdx.media = idx;
+        if (c.includes('filial') || c.includes('unidade') || c.includes('depósito') || c.includes('deposito') || c === 'loja') {
+          if (colIdx.filial === -1 || c.includes('nome')) colIdx.filial = idx;
+        }
+        if (c === 'grupo de itens' || c === 'grupo de item' || c.includes('grupo') || c.includes('família') || c.includes('familia') || c.includes('setor') || c.includes('categoria')) {
+          if (colIdx.grupo === -1 || c === 'grupo de itens' || c === 'grupo de item') colIdx.grupo = idx;
+        }
+        if (c.includes('saldo') || c.includes('estoque') || c.includes('est.') || c.includes('quantidade') || c === 'qtd') {
+          // Prioritize specific "físico" stock over general saldo/estoque
+          if (colIdx.saldo === -1 || c.includes('fisico') || c.includes('físico')) colIdx.saldo = idx;
+        }
+        if (c.includes('média') || c.includes('media') || c.includes('méd') || c.includes('venda media')) colIdx.media = idx;
         if (c.includes('cobertura') || c.includes('cob.')) colIdx.cobertura = idx;
-        if (c.includes('critério') || c.includes('criterio') || c.includes('crit.')) colIdx.criterio = idx;
-        if (c.includes('sugestão') || c.includes('sugestao') || c.includes('sug.')) colIdx.sugestao = idx;
-        if (c.includes('total mov')) colIdx.total_mov = idx;
+        if (c.includes('critério') || c.includes('criterio') || c.includes('crit.') || c === 'situação' || c === 'situacao' || c === 'status') colIdx.criterio = idx;
+        if (c.includes('sugestão') || c.includes('sugestao') || c.includes('sug.') || c.includes('reposição')) colIdx.sugestao = idx;
+        if (c.includes('total mov') || c.includes('movimento') || c.includes('total vendas') || c.includes('movimento anual')) colIdx.total_mov = idx;
         if (c.includes('saldo anterior') || c.includes('estoque inicial') || c.includes('est. inicial') || c.includes('ant.')) colIdx.saldo_inicial = idx;
         if (c.includes('unidade de medida') || c === 'un' || c === 'um' || c.includes('unid')) colIdx.un = idx;
-        if (c === 'nome do fabricante' || (colIdx.fab === -1 && (c.includes('fabricante') || c.includes('fornecedor') || c.includes('marca')))) colIdx.fab = idx;
+        if (c === 'nome do fabricante' || c === 'fabricante' || c === 'marca' || (colIdx.fab === -1 && (c.includes('fabricante') || c.includes('fornecedor') || c.includes('marca') || c === 'fab'))) colIdx.fab = idx;
         if (c.includes('custo') || c === 'vlr custo' || c === 'unit cost') colIdx.custo = idx;
         if (c.includes('preço') || c.includes('preco') || c === 'vlr unit' || c === 'unit price' || c === 'vlr venda') colIdx.preco = idx;
         if (c.includes('lead time') || c.includes('leadtime') || c.includes('prazo') || c.includes('entrega')) colIdx.lead_time = idx;
@@ -192,7 +208,11 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
       un: colIdx.un >= 0 ? String(rawRow[colIdx.un] || 'UN').trim() : 'UN',
       fab: colIdx.fab >= 0 ? String(rawRow[colIdx.fab] || 'N/I').trim() : 'N/I',
       meses: monthVals,
-      t1, t2, t3, t4
+      t1, t2, t3, t4,
+      _normCod: normalizeString(cod),
+      _normDesc: normalizeString(String(rawRow[colIdx.desc] || '')),
+      _normGrupo: normalizeString(String(rawRow[colIdx.grupo] || 'OUTROS')),
+      _normFab: normalizeString(colIdx.fab >= 0 ? String(rawRow[colIdx.fab] || 'N/I') : 'N/I')
     };
 
     inventoryRecords.push(record);
@@ -288,9 +308,9 @@ export async function processFile(file: File, mode: AppMode): Promise<DashboardD
   if (inventorySheet) {
     const inventoryData = await processInventoryFile(file, inventorySheet);
     result.inventoryRecords = inventoryData.inventoryRecords;
-    result.fabs = inventoryData.fabs;
-    if (!result.groups || result.groups.length === 0) result.groups = inventoryData.groups;
-    if (!result.filiais || result.filiais.length === 0) result.filiais = inventoryData.filiais;
+    result.fabs = [...new Set([...(result.fabs || []), ...(inventoryData.fabs || [])])].sort();
+    result.groups = [...new Set([...(result.groups || []), ...(inventoryData.groups || [])])].sort();
+    result.filiais = [...new Set([...(result.filiais || []), ...(inventoryData.filiais || [])])].sort();
   }
 
   result.rowCount = (result.records?.length || 0) + (result.inventoryRecords?.length || 0);
@@ -327,11 +347,15 @@ async function processTransactionData(file: File, sheetData: any[][], mode: AppM
         if (c.includes('data') || c.includes('lançamento')) colIdx.date = idx;
         if (c.includes('tp doc') || c.includes('tipo')) colIdx.type = idx;
         if (c === 'nº doc/nf' || c === 'n° doc/nf' || c === 'nº doc' || c === 'n° doc' || c.includes('nº doc') || c.includes('n° doc') || c.includes('doc/nf') || c.includes('nota fiscal') || c === 'nf') colIdx.nf = idx;
-        if (c.includes('grupo de item') || c.includes('família') || c.includes('familia') || c.includes('setor') || c.includes('categoria')) colIdx.grupo = idx;
+        if (c === 'grupo de itens' || c === 'grupo de item' || c.includes('grupo de item') || c.includes('família') || c.includes('familia') || c.includes('setor') || c.includes('categoria')) {
+          if (colIdx.grupo === -1 || c.includes('grupo de item')) colIdx.grupo = idx;
+        }
         if (c.includes('parceiro') || c.includes('fornecedor') || c.includes('cliente') || c === 'nome' || c.includes('razão social')) colIdx.parceiro = idx;
-        if (c.includes('filial') || c.includes('unidade') || c.includes('u.n') || c.includes('depósito')) colIdx.filial = idx;
+        if (c.includes('filial') || c.includes('unidade') || c.includes('u.n') || c.includes('depósito')) {
+          if (colIdx.filial === -1 || c.includes('nome')) colIdx.filial = idx;
+        }
         if (c.includes('fabricante') || c.includes('fornecedor') || c.includes('marca') || c === 'fab') colIdx.fab = idx;
-        if (c === 'cod item' || c === 'código item' || c === 'codigo item' || c === 'cód. item' || c === 'cod. item' || c === 'cod_item' || c.match(/^c[oó]d\.?\s*item$/i)) {
+        if (c === 'cod item' || c === 'código item' || c === 'codigo item' || c === 'cód. item' || c === 'cod. item' || c === 'cod_item' || c.match(/^c[oó]d\.?\s*item$/i) || c.includes('n/ do item') || c.includes('n/ item')) {
           colIdx.code = idx;
         } else if (colIdx.code === 8 && (c.includes('cod') || c.includes('cód') || c === 'código' || c === 'codigo' || c === 'material' || c === 'sku')) {
           colIdx.code = idx;
@@ -339,7 +363,7 @@ async function processTransactionData(file: File, sheetData: any[][], mode: AppM
           colIdx.code = idx;
         }
 
-        if (c.includes('descrição') || c.includes('descricao') || c === 'descr' || c === 'desc' || c.includes('item desc')) colIdx.desc = idx;
+        if (c.includes('descrição do item') || c.includes('descrição') || c.includes('descricao') || c === 'descr' || c === 'desc' || c.includes('item desc')) colIdx.desc = idx;
         else if (c === 'item' && colIdx.desc === 11) colIdx.desc = idx;
         if (c.includes('un')) colIdx.un = idx;
         if (c.includes('quantidade') || c.includes('qtde') || c === 'qtd') colIdx.qty = idx;
@@ -358,7 +382,7 @@ async function processTransactionData(file: File, sheetData: any[][], mode: AppM
     if (/filial\s*:/i.test(line)) {
       for (const v of rowStr) {
         if (/filial\s*:/i.test(v)) {
-          const nome = v.replace(/filial\s*:\s*/i, '').split(' - ')[0].trim().toUpperCase();
+          const nome = v.replace(/filial\s*:\s*/i, '').trim().toUpperCase();
           if (nome) curFilial = nome;
           break;
         }

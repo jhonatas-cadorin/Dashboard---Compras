@@ -1,0 +1,54 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "System user with role-based access control.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["Admin Master", "Editor", "Viewer"] },
+        "status": { "type": "string", "enum": ["Active", "Inactive"] },
+        "permissions": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role", "status", "createdAt"]
+    },
+    "SystemConfig": {
+      "title": "System Config",
+      "description": "Global system settings.",
+      "type": "object",
+      "properties": {
+        "initialized": { "type": "boolean" },
+        "masterAdminUid": { "type": "string" }
+      }
+    },
+    "Log": {
+      "title": "System Log",
+      "description": "Audit logs for sensitive actions.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "action": { "type": "string" },
+        "metadata": { "type": "object" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles and permissions."
+    },
+    "/system_config/settings": {
+      "schema": "SystemConfig",
+      "description": "Global system configuration."
+    },
+    "/logs/{logId}": {
+      "schema": "Log",
+      "description": "Audit trails for administrative actions."
+    }
+  }
+}

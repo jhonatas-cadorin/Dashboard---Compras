@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import * as XLSX from 'xlsx';
 import { 
   Upload, 
   BarChart3, 
@@ -12,6 +13,7 @@ import {
   RefreshCcw, 
   FileSpreadsheet, 
   Users, 
+  LogIn,
   ClipboardList, 
   History,
   Package,
@@ -72,12 +74,21 @@ import {
   Trash2,
   Factory,
   Mail,
-  Send
+  Send,
+  Check,
+  MessageSquare,
+  Phone
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
+import { AuthProvider, useAuth } from './lib/AuthContext';
+import LoginPage from './components/LoginPage';
+import UsersManagement from './components/UsersManagement';
+import AuditLogs from './components/AuditLogs';
+
+type Module = 'dashboard' | 'predictive' | 'transfers' | 'purchases' | 'settings' | 'users' | 'audit' | 'logs' | 'permissions' | 'integrations';
+
 const MONTH_NAMES = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
-import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { 
@@ -98,16 +109,360 @@ import {
 import { DashboardData, PurchaseRecord, AppMode } from './types';
 import { processFile, formatCurrency, formatFullCurrency } from './utils/processFile';
 
+const GOOGLE_DRIVE_FILE_ID = "1hS4LpPqSavyxsK_B1PBiCxMcKnpNYyIT";
+const CSV_URL = `https://drive.google.com/uc?export=download&id=${GOOGLE_DRIVE_FILE_ID}`;
+
+/**
+ * Normalizes and processes CSV or XLSX data from Google Drive
+ */
+async function carregarPlanilha(): Promise<DashboardData | null> {
+  const CACHE_KEY = 'cortex_drive_cache_v1';
+  console.log("Iniciando carregamento da planilha do Google Drive...");
+  
+  try {
+    const tryFetch = async (url: string) => {
+      try {
+        const proxyUrl = `/api/proxy-drive?url=${encodeURIComponent(url)}`;
+        console.log(`Buscando via proxy: ${proxyUrl.substring(0, 50)}...`);
+        const response = await fetch(proxyUrl);
+        
+        if (!response.ok) {
+          let errorInfo = "";
+          try {
+            const errorJson = await response.json();
+            errorInfo = errorJson.error || JSON.stringify(errorJson);
+          } catch (e) {
+            errorInfo = response.statusText;
+          }
+          console.error(`Status de erro na resposta do proxy (${response.status}): ${errorInfo}`);
+          return null;
+        }
+        
+        const contentType = response.headers.get('content-type') || '';
+        const arrayBuffer = await response.arrayBuffer();
+
+        // If it looks like HTML, it's probably a Google Drive landing page/error/login
+        if (contentType.includes('text/html')) {
+          const text = new TextDecoder().decode(arrayBuffer);
+          if (text.trim().toLowerCase().startsWith('<!doctype html') || text.trim().toLowerCase().startsWith('<html')) {
+            console.warn("Recebido HTML em vez de Planilha. Verifique se o arquivo está público e se o link está correto. URL:", url);
+            return null;
+          }
+        }
+        
+        return arrayBuffer;
+      } catch (e: any) {
+        console.error(`Erro de rede ao tentar buscar no proxy para URL ${url}:`, e.message);
+        return null;
+      }
+    };
+
+    // Priority 1: Google Sheets Export (More reliable for shared docs)
+    const sheetsUrl = `https://docs.google.com/spreadsheets/d/${GOOGLE_DRIVE_FILE_ID}/export?format=xlsx&t=${Date.now()}`;
+    let buffer = await tryFetch(sheetsUrl);
+
+    // Priority 2: Direct UC Download (Fallback)
+    if (!buffer) {
+      console.log("Tentando fallback para UC download link...");
+      buffer = await tryFetch(`${CSV_URL}&t=${Date.now()}`);
+    }
+
+    if (!buffer) {
+      // Try to return from cache if fetch fails
+      const cached = localStorage.getItem(CACHE_KEY);
+      if (cached) {
+        console.log("Falha na rede - carregando do cache local");
+        return JSON.parse(cached);
+      }
+      throw new Error("Erro ao baixar planilha do Google Drive. Verifique se o arquivo está público (Qualquer pessoa com o link).");
+    }
+
+    console.log("Planilha recebida com sucesso. Tamanho:", buffer.byteLength, "bytes");
+
+    const workbook = XLSX.read(buffer, { type: 'array' });
+    console.log("Workbook lido. Abas encontradas:", workbook.SheetNames);
+    
+    let bestData: any[] = [];
+    let usedSheet = "";
+
+    // Tentativa de encontrar a melhor aba (a que tem mais dados úteis)
+    for (const sheetName of workbook.SheetNames) {
+      const worksheet = workbook.Sheets[sheetName];
+      const sheetData = XLSX.utils.sheet_to_json(worksheet, { defval: "" }) as any[];
+      
+      // Prioriza abas que parecem conter dados (pelo nome)
+      const nameLower = sheetName.toLowerCase();
+      const isDataSheet = nameLower.includes('dado') || nameLower.includes('estoq') || 
+                          nameLower.includes('prod') || nameLower.includes('mov') || 
+                          nameLower.includes('geral') || nameLower.includes('itens');
+      
+      if (isDataSheet && sheetData.length > 5) {
+        bestData = sheetData;
+        usedSheet = sheetName;
+        break; 
+      }
+
+      if (sheetData.length > bestData.length) {
+        bestData = sheetData;
+        usedSheet = sheetName;
+      }
+    }
+
+    if (bestData.length === 0) {
+      console.warn("Nenhum dado encontrado em nenhuma aba da planilha.");
+      return null;
+    }
+
+    console.log(`Usando aba: "${usedSheet}" com ${bestData.length} linhas.`);
+
+    const targetWorksheet = workbook.Sheets[usedSheet];
+    // Encontrar os cabeçalhos reais (procurar linha com Código e Descrição)
+    let headerRowIdx = -1;
+    const rawData = XLSX.utils.sheet_to_json(targetWorksheet, { header: 1, defval: "" }) as any[][];
+    
+    for (let r = 0; r < Math.min(rawData.length, 20); r++) {
+      const row = rawData[r].map(v => String(v || '').toLowerCase().trim());
+      const hasCod = row.some(c => c.includes('cod') || c.includes('material') || c.includes('item'));
+      const hasDesc = row.some(c => c.includes('desc') || c.includes('item') || c.includes('produto'));
+      if (hasCod && hasDesc) {
+        headerRowIdx = r;
+        break;
+      }
+    }
+
+    let saldoColIdx = -1;
+    let fallbackSaldoIdx = -1;
+    if (headerRowIdx >= 0) {
+      const headerRowCells = rawData[headerRowIdx] || [];
+      for (let c = 0; c < headerRowCells.length; c++) {
+        const cellVal = String(headerRowCells[c] || '').toLowerCase().trim()
+          .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+          .replace(/[^a-z0-9]/g, '_')
+          .replace(/_+/g, '_')
+          .replace(/^_+|_+$/g, '');
+        
+        if (cellVal === 'saldo_atual_fisico' || cellVal === 'saldo' || cellVal === 'estoque' || 
+            cellVal === 'qtd' || cellVal === 'quantidade' || cellVal === 'saldo_atual' || 
+            cellVal === 'estoque_atual' || cellVal.includes('fisico') || cellVal === 'saldo_fisico') {
+          saldoColIdx = c;
+          break;
+        }
+        if (cellVal.includes('saldo') || cellVal.includes('estoque') || cellVal.includes('qtd')) {
+          fallbackSaldoIdx = c;
+        }
+      }
+      if (saldoColIdx === -1 && fallbackSaldoIdx !== -1) {
+        saldoColIdx = fallbackSaldoIdx;
+      }
+    }
+
+    const sheetData = XLSX.utils.sheet_to_json(targetWorksheet, { 
+      defval: "",
+      range: headerRowIdx >= 0 ? headerRowIdx : 0
+    }) as any[];
+    
+    // Normalização agressiva de cabeçalhos
+    const normalizedData = sheetData.map(row => {
+      const newRow: any = { _original: row };
+      const keys = Object.keys(row);
+      
+      keys.forEach((key, index) => {
+        // Remove acentos, caracteres especiais e espaços para facilitar o match
+        const normKey = key.toLowerCase().trim()
+          .normalize("NFD").replace(/[\u0300-\u036f]/g, "") 
+          .replace(/[^a-z0-9]/g, '_') 
+          .replace(/_+/g, '_') 
+          .replace(/^_+|_+$/g, ''); 
+        
+        if (normKey) newRow[normKey] = row[key];
+        // Mapeamento por posição (fallback se os nomes falharem)
+        newRow[`col_${index}`] = row[key];
+      });
+      return newRow;
+    });
+
+    if (normalizedData.length > 0) {
+      console.log("Colunas normalizadas identificadas:", Object.keys(normalizedData[0]).filter(k => !k.startsWith('_') && !k.startsWith('col_')));
+    }
+
+    // Helper para extrair numero de strings formatadas
+    const parseNum = (v: any) => {
+      if (typeof v === 'number') return v;
+      if (v === null || v === undefined || v === "") return 0;
+      if (typeof v === 'string') {
+        const cleaned = v.replace(/[R$\s.]/g, '').replace(',', '.');
+        const num = parseFloat(cleaned);
+        return isNaN(num) ? 0 : num;
+      }
+      return parseFloat(v) || 0;
+    };
+
+    const inventoryRecords = normalizedData.map((r, index) => {
+       // Mapeamento extensivo de aliases + Fallback por posição
+       const saldo = parseNum(r.saldo_atual_fisico || r.saldo || r.estoque || r.qtd || r.quantidade || r.saldo_atual || r.estoque_atual || r.col_2 || r.col_3);
+       const media = parseNum(r.media || r.media_mensal || r.venda_media || r.saida_media || r.col_4 || r.col_5);
+       const total_mov = parseNum(r.total_mov || r.movimento_12m || r.venda_12m || r.total_vendas || r.col_6);
+       
+       // Meses
+       const meses = [
+         parseNum(r.jan || r.janeiro || r.mes_1 || r.m1), 
+         parseNum(r.fev || r.fevereiro || r.mes_2 || r.m2), 
+         parseNum(r.mar || r.marco || r.mes_3 || r.m3), 
+         parseNum(r.abr || r.abril || r.mes_4 || r.m4),
+         parseNum(r.mai || r.maio || r.mes_5 || r.m5), 
+         parseNum(r.jun || r.junho || r.mes_6 || r.m6), 
+         parseNum(r.jul || r.julho || r.mes_7 || r.m7), 
+         parseNum(r.ago || r.agosto || r.mes_8 || r.m8),
+         parseNum(r.set || r.setembro || r.mes_9 || r.m9), 
+         parseNum(r.out || r.outubro || r.mes_10 || r.m10), 
+         parseNum(r.nov || r.novembro || r.mes_11 || r.m11), 
+         parseNum(r.dez || r.dezembro || r.mes_12 || r.m12)
+       ];
+
+       // Codigo e Descrição mais flexíveis
+       const cod = String(r.n_do_item || r.n_item || r.cod || r.codigo || r.sku || r.ref || r.referencia || r.id || r.col_0 || '').trim();
+       const desc = String(r.descricao_do_item || r.descricao || r.desc || r.descr || r.item || r.produto || r.nome || r.col_1 || 'N/I').trim();
+
+       // Filtra linhas vazias ou de cabeçalho
+       if ((!cod || cod === "0") && (desc === 'N/I' || desc === "" || desc.toLowerCase().includes('descricao'))) return null;
+
+       const total_calc = total_mov || (meses.reduce((a, b) => a + b, 0)) || (media * 12);
+       const media_calc = media || (total_calc / 12);
+       const coverage = media_calc > 0 ? saldo / media_calc : (saldo > 0 ? 99 : 0);
+
+       const statusText = String(r.criterio || r.status || r.situacao || '').toUpperCase();
+       
+       const normalizeCrit = (s: string, saldo: number, totalMov: number, coverage: number) => {
+          if (totalMov === 0 && saldo === 0) return 'OK';
+          if (totalMov === 0 && saldo > 0) return 'SEM_MOVIMENTO';
+          if (saldo <= 0 && totalMov > 0) return 'URGENTE';
+          if (saldo > totalMov && totalMov > 0) return 'ESTOQUE_ALTO';
+          if (coverage <= 1.0) return 'COMPRAR_JA';
+          if (coverage <= 2.0) return 'COMPRAR_BREVE';
+          return 'OK';
+       };
+
+       const custo = parseNum(r.custo || r.vlr_custo || r.preco_custo || r.valor_custo);
+       const preco = parseNum(r.preco || r.vlr_venda || r.tabela || r.valor_venda);
+
+       return {
+         cod: cod || `S-${Math.random().toString(36).substr(2, 5)}`,
+         desc,
+         curva: String(r.curva_abc || r.curva || r.abc || r.classe || '').toUpperCase().slice(0, 1),
+         filial: String(r.nome_da_filial || r.filial || r.unidade || r.loja || 'GERAL').toUpperCase(),
+         grupo: String(r.grupo_de_itens || r.grupo_de_item || r.grupo || r.familia || r.categoria || 'OUTROS').toUpperCase(),
+         fab: String(r.nome_do_fabricante || r.fabricante || r.marca || r.fornecedor || r.fab || 'N/I').toUpperCase(),
+         un: String(r.un || r.unidade_medida || r.um || 'UN').toUpperCase(),
+         saldo,
+         media: media_calc,
+         total_mov: total_calc,
+         cobertura: parseNum(r.cobertura || coverage),
+         meses_com_mov: meses.filter(m => m > 0).length,
+         mov3: meses.slice(-3).reduce((a, b) => a + b, 0),
+         custo,
+         preco,
+         valor_ruptura: ((saldo <= 0 && total_calc > 0) ? (media_calc * (preco || custo || 0)) : 0),
+         capital_parado: ((saldo > total_calc && total_calc > 0) ? (saldo * custo) : 0),
+         saldoTransferivel: Math.max(0, saldo - total_calc),
+         sugestao: parseNum(r.sugestao || r.sugestao_compra || Math.max(0, (media_calc * 2) - saldo)),
+         criterio: normalizeCrit(statusText, saldo, total_calc, coverage),
+         meses,
+         t1: meses.slice(0, 3).reduce((a, b) => a + b, 0),
+         t2: meses.slice(3, 6).reduce((a, b) => a + b, 0),
+         t3: meses.slice(6, 9).reduce((a, b) => a + b, 0),
+         t4: meses.slice(9, 12).reduce((a, b) => a + b, 0),
+         sheetName: usedSheet,
+         sheetRowIdx: headerRowIdx + index + 2,
+         sheetColIdx: saldoColIdx
+       };
+    }).filter((r): r is any => r !== null); 
+
+    console.log(`Processamento concluído. ${inventoryRecords.length} registros válidos encontrados.`);
+
+    // --- ABC Classification Logic ---
+    const sortedByMov = [...inventoryRecords].sort((a, b) => b.total_mov - a.total_mov);
+    const globalTotalMov = sortedByMov.reduce((acc, rs) => acc + (rs.total_mov || 0), 0);
+    let cumulativeMov = 0;
+
+    sortedByMov.forEach(rs => {
+      // Analyze ABC automatically as requested
+      cumulativeMov += (rs.total_mov || 0);
+      if (globalTotalMov > 0) {
+        const pct = (cumulativeMov / globalTotalMov) * 100;
+        // Classe A: 80% Top, B: 15% (80-95%), C: 5% (95-100%)
+        if (pct <= 80) rs.curva = 'A';
+        else if (pct <= 95) rs.curva = 'B';
+        else rs.curva = 'C';
+      } else {
+        rs.curva = 'C';
+      }
+    });
+
+    if (inventoryRecords.length === 0) {
+      console.error("DEBUG - Cabeçalhos brutos da primeira linha:", Object.keys(bestData[0] || {}));
+      console.error("Nenhum registro válido foi encontrado. Verifique se os nomes das colunas na planilha são mapeáveis (ex: Codigo, Produto, Saldo, etc).");
+      return null;
+    }
+
+    const filiais = [...new Set(inventoryRecords.map(r => r.filial))].sort();
+    const groups = [...new Set(inventoryRecords.map(r => r.grupo))].sort();
+    const fabs = [...new Set(inventoryRecords.map(r => r.fab))].sort();
+
+    const result: DashboardData = {
+      mode: 'missing_items',
+      filename: 'Google Drive Spreadsheet',
+      rowCount: inventoryRecords.length,
+      filiais,
+      groups,
+      fabs,
+      inventoryRecords
+    };
+
+    // Cache successfully parsed data
+    try {
+      localStorage.setItem(CACHE_KEY, JSON.stringify(result));
+    } catch (e) {
+      console.warn("Storage quota exceeded, cache ignored.");
+    }
+
+    return result;
+  } catch (error) {
+    console.error("Erro carregarPlanilha:", error);
+    // Try to return from cache if error occurs
+    const cached = localStorage.getItem(CACHE_KEY);
+    if (cached) return JSON.parse(cached);
+    return null;
+  }
+}
+
 // Utility to clean filial names according to user preference
 const cleanFilialName = (name: string) => {
   if (!name) return '';
-  return name
+  const cleaned = name
     .replace(/COOPERATIVA DE CAFEICULTORES E AGROPECUARISTAS/gi, '')
     .replace(/REDE COOXUPÉ\s*-\s*/gi, '')
     .replace(/COOXUPE\s*-\s*/gi, '')
-    .split('-')[0] // Get initial part
-    .trim()
-    .toUpperCase();
+    .trim();
+    
+  // If it has a hyphen, the part after it is usually the human-friendly name
+  const parts = cleaned.split(' - ');
+  if (parts.length > 1) {
+    return parts[1].trim().toUpperCase();
+  }
+  
+  // Fallback for simple hyphen
+  const simpleParts = cleaned.split('-');
+  if (simpleParts.length > 1 && simpleParts[0].length <= 5) {
+    return simpleParts[1].trim().toUpperCase();
+  }
+
+  return cleaned.toUpperCase();
+};
+
+const getBranchId = (name: string) => {
+  if (!name) return 'GERAL';
+  // Use everything before " - " for unique identification if present, otherwise just trim and upper
+  return name.split(' - ')[0].split('-')[0].trim().toUpperCase();
 };
 
 type Screen = 'selection' | 'upload' | 'processing' | 'dashboard' | 'error';
@@ -116,6 +471,19 @@ function fmtBRLSimple(v: number) {
   if (v >= 1000000) return `${(v / 1000000).toFixed(1)}M`;
   if (v >= 1000) return `${(v / 1000).toFixed(0)}k`;
   return v.toString();
+}
+
+/** 
+ * Utility to remove accents and special characters for fuzzy/robust search 
+ */
+function normalizeString(str: string): string {
+  if (!str) return '';
+  return str
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[-/.\s]/g, "")
+    .trim();
 }
 
 
@@ -152,6 +520,7 @@ function ItemDetailModal({
 
   const [recommendation, setRecommendation] = useState<string>(item.recommendation || 'Gerando recomendação inteligente...');
   const [loadingAI, setLoadingAI] = useState(false);
+  const [selectedBranch, setSelectedBranch] = useState<any>(null);
 
   useEffect(() => {
     if (!item.recommendation && !loadingAI) {
@@ -161,13 +530,36 @@ function ItemDetailModal({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ item })
       })
-      .then(res => res.json())
+      .then(res => {
+        if (!res.ok) {
+          throw new Error('Serviço de IA indisponível tempórariamente.');
+        }
+        return res.json();
+      })
       .then(data => {
         setRecommendation(data.recommendation || 'Não foi possível gerar uma recomendação no momento.');
       })
       .catch(err => {
         console.error('AI Fetch Error:', err);
-        setRecommendation('Erro ao conectar com o serviço de IA.');
+        // Robust front-end semantic heuristic fallback if the backend completely fails or isn't reachable
+        const desc = item.desc || 'item';
+        const status = item.statusSignal || '';
+        const curva = item.curva || 'C';
+        const cobertura = parseFloat(item.cobertura) || 0;
+        
+        let localFallback = `Estoque equilibrado. Cobertura de ${cobertura.toFixed(1)} meses. Giro dentro do previsto para este item.`;
+        if (status === 'RUPTURA') {
+          localFallback = `Alerta de ruptura para ${desc}! Priorizar transferência imediata de outras filiais ou solicitar nova compra de urgência.`;
+        } else if (status === 'EXCESSO') {
+          localFallback = `Estoque em excesso detectado (${cobertura.toFixed(1)} meses). Suspender novos pedidos e focar na transferência para filiais necessitadas.`;
+        } else if (status === 'CRITICO') {
+          localFallback = `Giro de estoque crítico. Cobertura muito baixa (${cobertura.toFixed(1)} meses). Efetuar transferência urgente das filiais parcerias.`;
+        } else if (curva === 'A') {
+          localFallback = `Item estratégico Curva A. Manter nível ideal e programar reposição preventiva para evitar paradas operacionais.`;
+        } else if (status === 'SAUDAVEL') {
+          localFallback = `Item com estoque equilibrado. Manter acompanhamento regular de consumo sem necessidade de intervenção imediata.`;
+        }
+        setRecommendation(localFallback);
       })
       .finally(() => setLoadingAI(false));
     }
@@ -246,37 +638,45 @@ function ItemDetailModal({
               <div className="flex justify-between items-center mb-6">
                 <h3 className="text-[9px] font-black text-brand-text-secondary uppercase tracking-widest flex items-center gap-2">
                    <BarChart2 className="w-3.5 h-3.5 text-brand-blue" />
-                   Evolução Histórica (12 Meses)
+                   Evolução Histórica (12 Meses) — {selectedBranch ? cleanFilialName(selectedBranch.filial) : cleanFilialName(item.filial)}
                 </h3>
+                {selectedBranch && (
+                  <button 
+                    onClick={() => setSelectedBranch(null)}
+                    className="text-[9px] font-black text-brand-blue uppercase tracking-widest hover:underline hover:brightness-110 active:scale-95 transition-all"
+                  >
+                    Ver Origem ({cleanFilialName(item.filial)})
+                  </button>
+                )}
               </div>
               <div className="h-[180px]">
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={item.meses?.map((v: number, i: number) => ({ name: MONTH_NAMES[i], value: v })) || []}>
+                  <AreaChart data={(selectedBranch ? selectedBranch.meses : item.meses)?.map((v: number, i: number) => ({ name: MONTH_NAMES[i], value: v })) || []}>
                     <defs>
                       <linearGradient id="detailHist" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.2}/>
-                        <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
+                        <stop offset="5%" stopColor={selectedBranch ? "#10b981" : "#3b82f6"} stopOpacity={0.2}/>
+                        <stop offset="95%" stopColor={selectedBranch ? "#10b981" : "#3b82f6"} stopOpacity={0}/>
                       </linearGradient>
                     </defs>
                     <CartesianGrid strokeDasharray="3 3" stroke={chartColors.grid} vertical={false} />
                     <XAxis 
-                      dataKey="name" 
-                      axisLine={false} 
-                      tickLine={false} 
-                      tick={{ fill: chartColors.text, fontSize: 8, fontWeight: 700 }}
+                       dataKey="name" 
+                       axisLine={false} 
+                       tickLine={false} 
+                       tick={{ fill: chartColors.text, fontSize: 8, fontWeight: 700 }}
                     />
                     <YAxis hide />
                     <Tooltip 
-                      contentStyle={{ backgroundColor: chartColors.tooltipBg, border: `1px solid ${chartColors.grid}`, borderRadius: '12px', color: chartColors.tooltipText }}
-                      itemStyle={{ color: chartColors.tooltipText, fontSize: '10px', fontWeight: 700 }}
+                       contentStyle={{ backgroundColor: chartColors.tooltipBg, border: `1px solid ${chartColors.grid}`, borderRadius: '12px', color: chartColors.tooltipText }}
+                       itemStyle={{ color: chartColors.tooltipText, fontSize: '10px', fontWeight: 700 }}
                     />
                     <Area 
-                      type="monotone" 
-                      dataKey="value" 
-                      stroke={chartColors.stroke} 
-                      strokeWidth={2}
-                      fillOpacity={1} 
-                      fill="url(#detailHist)" 
+                       type="monotone" 
+                       dataKey="value" 
+                       stroke={selectedBranch ? "#10b981" : chartColors.stroke} 
+                       strokeWidth={2}
+                       fillOpacity={1} 
+                       fill="url(#detailHist)" 
                     />
                   </AreaChart>
                 </ResponsiveContainer>
@@ -287,7 +687,7 @@ function ItemDetailModal({
             <div className="lg:col-span-12 xl:col-span-5 bg-brand-card dark:bg-brand-card/20 border border-brand-border rounded-[1.5rem] p-5 shadow-sm flex flex-col">
               <h3 className="text-[9px] font-black text-brand-text-secondary uppercase tracking-widest mb-5 flex items-center gap-2">
                  <Zap className="w-3.5 h-3.5 text-brand-green" />
-                 Oportunidade na Rede (OK)
+                 Oportunidade na Rede (CLIQUE PARA VER GRÁFICO)
               </h3>
               <div className="flex-1 space-y-2 overflow-y-auto max-h-[180px] pr-2 custom-scrollbar">
                 {networkOptions.length === 0 ? (
@@ -297,15 +697,36 @@ function ItemDetailModal({
                   </div>
                 ) : (
                   <React.Fragment>
-                    {networkOptions.map((opt, i) => (
-                      <div key={i} className="flex justify-between items-center bg-gray-50 dark:bg-black/20 px-3 py-2.5 rounded-xl border border-brand-border hover:border-brand-green/30 transition-all hover:bg-gray-100 dark:hover:bg-white/[0.05]">
-                        <span className="text-[10px] font-bold text-brand-text-primary uppercase">{cleanFilialName(opt.filial)}</span>
-                        <div className="flex items-center gap-1.5 min-w-[60px] justify-end">
-                           <span className="text-sm font-black text-brand-green">{opt.saldoTransferivel.toLocaleString()}</span>
-                           <span className="text-[7px] font-black text-brand-text-secondary opacity-40 dark:opacity-30 uppercase">{opt.un}</span>
-                        </div>
-                      </div>
-                    ))}
+                    {networkOptions.map((opt, i) => {
+                      const isSelected = selectedBranch?.filial === opt.filial;
+                      return (
+                        <button 
+                          key={i} 
+                          type="button"
+                          onClick={() => {
+                            setSelectedBranch(prev => prev?.filial === opt.filial ? null : opt);
+                          }}
+                          className={`w-full flex justify-between items-center px-3 py-2.5 rounded-xl border transition-all text-left group ${
+                            isSelected 
+                              ? 'border-brand-blue bg-brand-blue/[0.04] dark:bg-brand-blue/[0.08] shadow-sm' 
+                              : 'border-brand-border bg-gray-50 dark:bg-black/20 hover:border-brand-green/30 hover:bg-gray-100 dark:hover:bg-white/[0.05]'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5">
+                            <div className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center transition-colors ${
+                              isSelected ? 'border-brand-blue bg-brand-blue' : 'border-brand-border'
+                            }`}>
+                              {isSelected && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
+                            </div>
+                            <span className="text-[10px] font-bold text-brand-text-primary uppercase">{cleanFilialName(opt.filial)}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 min-w-[60px] justify-end font-mono">
+                             <span className="text-xs font-black text-brand-green">{opt.saldoTransferivel.toLocaleString()}</span>
+                             <span className="text-[7px] font-black text-brand-text-secondary opacity-40 dark:opacity-30 uppercase">{opt.un}</span>
+                          </div>
+                        </button>
+                      );
+                    })}
                   </React.Fragment>
                 )}
               </div>
@@ -449,7 +870,12 @@ function InventoryDashboardView({
   theme,
   onExportExcel,
   onExportPDF,
-  onPrint
+  onPrint,
+  activeModule,
+  setActiveModule,
+  viewType: propViewType,
+  setViewType: propSetViewType,
+  setData
 }: { 
   data: DashboardData, 
   filteredData: any,
@@ -468,11 +894,29 @@ function InventoryDashboardView({
   theme: 'light' | 'dark',
   onExportExcel: (items: any[], type: string) => void,
   onExportPDF: (items: any[], type: string) => void,
-  onPrint: () => void
+  onPrint: () => void,
+  activeModule?: Module,
+  setActiveModule?: (m: Module) => void,
+  viewType?: 'grid' | 'table',
+  setViewType?: (vt: 'grid' | 'table') => void,
+  setData?: React.Dispatch<React.SetStateAction<DashboardData | null>>
 }) {
   const [page, setPage] = useState(0);
   const [selectedItem, setSelectedItem] = useState<any | null>(null);
   const [desiredQtys, setDesiredQtys] = useState<Record<string, number>>({});
+
+  const { loginWithGoogle, googleAccessToken } = useAuth();
+  const [updateSheets, setUpdateSheets] = useState(true);
+
+  const getColumnLetter = (colIndex: number): string => {
+    let temp = colIndex;
+    let letter = '';
+    while (temp >= 0) {
+      letter = String.fromCharCode((temp % 26) + 65) + letter;
+      temp = Math.floor(temp / 26) - 1;
+    }
+    return letter;
+  };
 
   const chartColors = useMemo(() => ({
     grid: theme === 'dark' ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.06)",
@@ -584,7 +1028,29 @@ function InventoryDashboardView({
 
   const COLORS = ['#8b5cf6', '#6366f1', '#06b6d4', '#10b981', '#f59e0b', '#ef4444'];
 
-  const [viewMode, setViewMode] = useState<'standard' | 'predictive' | 'strategic' | 'purchases' | 'transfers'>('standard');
+  const [viewMode, setViewModeInternal] = useState<'standard' | 'predictive' | 'strategic' | 'purchases' | 'transfers'>('standard');
+
+  const setViewMode = (mode: 'standard' | 'predictive' | 'strategic' | 'purchases' | 'transfers') => {
+    setViewModeInternal(mode);
+    if (setActiveModule) {
+      if (mode === 'standard') setActiveModule('dashboard');
+      else if (mode === 'predictive') setActiveModule('predictive');
+      else if (mode === 'transfers') setActiveModule('transfers');
+      else if (mode === 'purchases') setActiveModule('purchases');
+    }
+  };
+
+  useEffect(() => {
+    if (activeModule === 'dashboard') {
+      setViewModeInternal('standard');
+    } else if (activeModule === 'predictive') {
+      setViewModeInternal('predictive');
+    } else if (activeModule === 'transfers') {
+      setViewModeInternal('transfers');
+    } else if (activeModule === 'purchases') {
+      setViewModeInternal('purchases');
+    }
+  }, [activeModule]);
 
   const predictions = useMemo(() => {
     const base = filteredData.filtered || [];
@@ -628,10 +1094,325 @@ function InventoryDashboardView({
 
   const totalFilialSaldo = useMemo(() => Object.values(filialAgg).reduce((a: number, b: number) => a + (b as number), 0), [filialAgg]);
   
-  const [viewType, setViewType] = useState<'grid' | 'table'>('table');
+  const [localViewType, setLocalViewType] = useState<'grid' | 'table'>('table');
+  const viewType = propViewType !== undefined ? propViewType : localViewType;
+  const setViewType = propSetViewType !== undefined ? propSetViewType : setLocalViewType;
   const [cartItems, setCartItems] = useState<Record<string, { item: any, qty: number, sourceFilial?: string, reason?: string }>>({});
   const [transferSelection, setTransferSelection] = useState<{ item: any, qty: number, options: any[] } | null>(null);
-  const [separationModal, setSeparationModal] = useState<{ isOpen: boolean, destBranch: string, email: string } | null>(null);
+  const [separationModal, setSeparationModal] = useState<{ isOpen: boolean, destBranch: string, email: string, phone: string } | null>(null);
+  const [selectedSources, setSelectedSources] = useState<string[]>([]);
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
+
+  // Formats WhatsApp message nicely for the destination manager
+  const getWhatsAppMessage = (destBranch: string, items: any[]) => {
+    let text = `*📦 Solicitação de Separação para Transferência*\n`;
+    text += `*Destino:* _${destBranch}_\n\n`;
+    text += `*Itens a Serem Separados:*\n`;
+    
+    items.forEach((it: any, idx: number) => {
+      text += `*${idx + 1}.* ${it.desc}\n`;
+      text += `   • *Código:* \`${it.cod}\`\n`;
+      text += `   • *Qtd:* *${it.qty}* ${it.un || 'UN'}\n`;
+      text += `   • *Origem:* ${it.source}\n`;
+      text += `   • *Motivo:* ${it.reason}\n\n`;
+    });
+    
+    text += `_Disparado pelo Cortex Inteligência Logística_`;
+    return text;
+  };
+
+  const handleConfirmAndSend = async (method: 'email' | 'whatsapp' | 'pdf' | 'excel') => {
+    if (!separationModal) return;
+    const { destBranch, email, phone } = separationModal;
+    
+    if (method === 'email' && (!email || !email.includes('@'))) {
+      alert('Por favor, informe um e-mail válido.');
+      return;
+    }
+
+    setIsSendingEmail(true);
+
+    let token = googleAccessToken;
+    if (updateSheets) {
+      if (!token) {
+        const confirmConnect = window.confirm(
+          "Você escolheu atualizar a planilha do Google Sheets. Para prosseguir, precisamos que você se conecte com sua conta Google. Deseja fazer login agora?"
+        );
+        if (confirmConnect) {
+          try {
+            token = await loginWithGoogle();
+          } catch (loginErr: any) {
+            alert(`Falha no login com o Google: ${loginErr.message || loginErr}. Prosseguindo com o envio sem atualização automática no Google Sheets.`);
+          }
+        } else {
+          console.log("Sem permissão ou login do Google recusado pelo usuário.");
+        }
+      }
+    }
+
+    // Get all items in this group
+    const itemsInGroup = groupedTransfers[destBranch] || [];
+    
+    const itemsPayload = itemsInGroup.map(r => ({
+      cod: r.cod,
+      desc: r.desc,
+      qty: r.desiredQty,
+      un: r.un,
+      source: r.sourceFilial,
+      reason: r.originReason || r.statusSignal || 'Reposição'
+    }));
+
+    let emailSentSuccessfully = false;
+    let emailMessage = '';
+
+    if (method === 'email') {
+      const emailContent = {
+        destination: destBranch,
+        email: email,
+        items: itemsPayload
+      };
+
+      try {
+        const res = await fetch('/api/send-email', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(emailContent)
+        });
+        
+        const resData = await res.json();
+        if (!res.ok) {
+          throw new Error(resData.error || 'Erro do servidor ao enviar e-mail');
+        }
+        emailSentSuccessfully = true;
+        emailMessage = resData.message || `Solicitação de separação enviada com sucesso para ${email}!`;
+      } catch (error: any) {
+        console.error('Error sending email:', error);
+        alert(`Erro ao tentar enviar e-mail de separação: ${error.message || error}.\n\nPara agilizar a operação você pode utilizar o botão "Confirmar e Enviar por WhatsApp", que envia sua lista de materiais instantaneamente.`);
+        setIsSendingEmail(false);
+        return;
+      }
+    } else if (method === 'pdf') {
+      try {
+        onExportPDF(itemsInGroup, 'Transferencia');
+      } catch (err: any) {
+        console.error("Erro ao gerar PDF:", err);
+      }
+    } else if (method === 'excel') {
+      try {
+        onExportExcel(itemsInGroup, 'Transferencia');
+      } catch (err: any) {
+        console.error("Erro ao gerar Excel:", err);
+      }
+    }
+
+    // Se "updateSheets" estiver ativo, persistimos as alterações na planilha no Google Sheets via API de forma não-bloqueante
+    let sheetsSuccessStr = "";
+    if (updateSheets && token && data && data.inventoryRecords) {
+      try {
+        const batchUpdates: any[] = [];
+        
+        data.inventoryRecords.forEach((img: any) => {
+          let newSaldo = img.saldo;
+          let changed = false;
+          
+          itemsInGroup.forEach(r => {
+            if (img.cod === r.cod) {
+              const myFilialCode = img.filial.split(' - ')[0].trim();
+              const cleanSourceCode = r.sourceFilial?.split(' - ')[0].trim();
+              const cleanDestCode = r.filial?.split(' - ')[0].trim();
+              
+              const matchesSource = myFilialCode === cleanSourceCode;
+              const matchesDest = myFilialCode === cleanDestCode;
+              
+              if (matchesSource) {
+                newSaldo = Math.max(0, newSaldo - (r.desiredQty || 0));
+                changed = true;
+              } else if (matchesDest) {
+                newSaldo = newSaldo + (r.desiredQty || 0);
+                changed = true;
+              }
+            }
+          });
+          
+          if (changed && img.sheetName && img.sheetRowIdx && img.sheetColIdx !== -1) {
+            const rangeStr = `'${img.sheetName}'!${getColumnLetter(img.sheetColIdx)}${img.sheetRowIdx}`;
+            batchUpdates.push({
+              range: rangeStr,
+              values: [[newSaldo]]
+            });
+          }
+        });
+
+        if (batchUpdates.length > 0) {
+          console.log("Enviando atualizações para o Google Sheets:", batchUpdates);
+          const sheetsRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${GOOGLE_DRIVE_FILE_ID}/values:batchUpdate`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              valueInputOption: 'USER_ENTERED',
+              data: batchUpdates
+            })
+          });
+
+          if (!sheetsRes.ok) {
+            const errBody = await sheetsRes.text();
+            console.error("Erro Google Sheets API:", errBody);
+            sheetsSuccessStr = " (Nota: Ocorreu um erro ao atualizar a planilha no Google Sheets automaticamente. Por favor, verifique suas permissões.)";
+          } else {
+            sheetsSuccessStr = " E a planilha do Google Sheets foi atualizada automaticamente com as novas quantidades!";
+            console.log("Sucesso ao atualizar planilha no Sheets API!");
+          }
+        }
+      } catch (sheetsErr: any) {
+        console.error("Erro ao tentar atualizar Google Sheets:", sheetsErr);
+        sheetsSuccessStr = " (Nota: Ocorreu um erro ao conectar com o Google Sheets API para atualizar as quantidades.)";
+      }
+    }
+
+    // Update inventory records stock levels (Movimentação física de estoque na planilha/dashboard)
+    if (setData) {
+      setData(prevData => {
+        if (!prevData || !prevData.inventoryRecords) return prevData;
+        const updatedRecords = prevData.inventoryRecords.map((img: any) => {
+          let newSaldo = img.saldo;
+          let changed = false;
+          
+          itemsInGroup.forEach(r => {
+            if (img.cod === r.cod) {
+              const myFilialCode = img.filial.split(' - ')[0].trim();
+              const cleanSourceCode = r.sourceFilial?.split(' - ')[0].trim();
+              const cleanDestCode = r.filial?.split(' - ')[0].trim();
+              
+              const matchesSource = myFilialCode === cleanSourceCode;
+              const matchesDest = myFilialCode === cleanDestCode;
+              
+              if (matchesSource) {
+                newSaldo = Math.max(0, newSaldo - (r.desiredQty || 0));
+                changed = true;
+              } else if (matchesDest) {
+                newSaldo = newSaldo + (r.desiredQty || 0);
+                changed = true;
+              }
+            }
+          });
+          
+          if (changed) {
+            return {
+              ...img,
+              saldo: newSaldo
+            };
+          }
+          return img;
+        });
+        
+        return {
+          ...prevData,
+          inventoryRecords: updatedRecords
+        };
+      });
+    }
+
+    // Remove individual items from cartItems (limpar a lista de transferência)
+    setCartItems(prev => {
+      const next = { ...prev };
+      itemsInGroup.forEach(r => {
+        if (r.cartKey && next[r.cartKey]) {
+          delete next[r.cartKey];
+        } else {
+          const key1 = `${r.cod}-${r.filial}`;
+          delete next[key1];
+          Object.keys(next).forEach(k => {
+            if (k.startsWith(`${key1}-`) && !k.includes("AUTO-PURCHASE")) {
+              delete next[k];
+            }
+          });
+        }
+      });
+      return next;
+    });
+
+    if (method === 'whatsapp') {
+      const waText = getWhatsAppMessage(destBranch, itemsPayload);
+      const cleanPhone = phone ? phone.replace(/\D/g, '') : '';
+      const waUrl = cleanPhone 
+        ? `https://api.whatsapp.com/send?phone=${cleanPhone}&text=${encodeURIComponent(waText)}`
+        : `https://api.whatsapp.com/send?text=${encodeURIComponent(waText)}`;
+      
+      window.open(waUrl, '_blank');
+      
+      alert(`Quantidade atualizada nos estoques locais com sucesso!${sheetsSuccessStr}\n\nO WhatsApp com a mensagem formatada contendo a lista de ${itemsPayload.length} itens foi preparado e aberto em uma nova aba.`);
+    } else if (method === 'pdf') {
+      alert(`Lista de separação para ${destBranch} gerada em arquivo PDF com sucesso! Os estoques correspondentes foram atualizados e a lista foi limpa.${sheetsSuccessStr}`);
+    } else if (method === 'excel') {
+      alert(`Lista de separação para ${destBranch} gerada em planilha Excel com sucesso! Os estoques correspondentes foram atualizados e a lista foi limpa.${sheetsSuccessStr}`);
+    } else {
+      alert((emailMessage || `Solicitação de separação enviada com sucesso para ${destBranch} e e-mail ${email}! Os estoques correspondentes foram atualizados e os itens removidos da lista de transferências.`) + sheetsSuccessStr);
+    }
+
+    setSeparationModal(null);
+    setIsSendingEmail(false);
+  };
+
+  useEffect(() => {
+    if (transferSelection) {
+      setSelectedSources([]);
+    }
+  }, [transferSelection]);
+
+  const isItemInCart = useCallback((cod: string, filial: string) => {
+    return `${cod}-${filial}` in cartItems || Object.keys(cartItems).some(k => k.startsWith(`${cod}-${filial}-`));
+  }, [cartItems]);
+
+  const handleConfirmMultiTransfer = () => {
+    if (!transferSelection || selectedSources.length === 0) return;
+
+    const item = transferSelection.item;
+    const myFilial = item.filial.split(' - ')[0];
+    let reason = item.statusSignal === 'RUPTURA' ? 'Ruptura' : item.saldo <= 0 ? 'Estoque zerado' : 'Reposição Estratégica';
+
+    setCartItems(prev => {
+      const next = { ...prev };
+
+      // Calculate distribution
+      let remaining = transferSelection.qty;
+      selectedSources.forEach(sourceFilialName => {
+        if (remaining <= 0) return;
+        const opt = transferSelection.options.find(o => o.filial === sourceFilialName);
+        if (opt) {
+          const available = opt.saldo;
+          const taken = Math.min(remaining, available);
+          if (taken > 0) {
+            const cartKey = `${item.cod}-${item.filial}-${sourceFilialName.split(' - ')[0]}`;
+            next[cartKey] = {
+              item,
+              qty: taken,
+              sourceFilial: sourceFilialName,
+              reason: 'Redistribuição de Estoque'
+            };
+            remaining -= taken;
+          }
+        }
+      });
+
+      // If there is still remaining quantity, add to purchase
+      if (remaining > 0) {
+        const purchaseKey = `${item.cod}-${item.filial}-AUTO-PURCHASE`;
+        next[purchaseKey] = {
+          item,
+          qty: remaining,
+          sourceFilial: myFilial,
+          reason: 'Transferência insuficiente'
+        };
+      }
+
+      return next;
+    });
+
+    setTransferSelection(null);
+  };
 
   const addToCart = (item: any, qty: number, sourceFilial?: string, forcePurchase: boolean = false, autoSplit: boolean = false) => {
     const key = `${item.cod}-${item.filial}`;
@@ -724,6 +1505,11 @@ function InventoryDashboardView({
     setCartItems(prev => {
       const newCart = { ...prev };
       delete newCart[key];
+      Object.keys(newCart).forEach(k => {
+        if (k.startsWith(`${key}-`)) {
+          delete newCart[k];
+        }
+      });
       return newCart;
     });
   };
@@ -830,30 +1616,36 @@ function InventoryDashboardView({
     if (viewMode !== 'purchases' && viewMode !== 'transfers') return { purchaseItems: [], transferItems: [] };
     
     // items that were MANUALLY added to the cart
-    const itemsInCart = Object.values(cartItems);
+    const itemsInCart = Object.entries(cartItems) as [string, { item: any, qty: number, sourceFilial?: string, reason?: string }][];
 
-    const pItems = itemsInCart.filter(({ item, sourceFilial }) => {
-      const myFilial = item.filial.split(' - ')[0];
-      return sourceFilial === myFilial;
-    }).map(({ item, qty, reason }) => ({ ...item, desiredQty: qty, originReason: reason }));
+    const pItems = itemsInCart.filter(([key, value]) => {
+      const myFilial = value.item.filial.split(' - ')[0];
+      return value.sourceFilial === myFilial;
+    }).map(([key, value]) => ({ 
+      ...value.item, 
+      desiredQty: value.qty, 
+      originReason: value.reason,
+      cartKey: key 
+    }));
 
-    const tItems = itemsInCart.filter(({ item, sourceFilial }) => {
-      const myFilial = item.filial.split(' - ')[0];
-      return sourceFilial && sourceFilial !== myFilial;
-    }).map(({ item, qty, sourceFilial, reason }) => {
-      const options = (transferableMap[item.cod] || [])
-        .filter((opt: any) => opt.filial !== item.filial.split(' - ')[0] && opt.saldo > 0)
+    const tItems = itemsInCart.filter(([key, value]) => {
+      const myFilial = value.item.filial.split(' - ')[0];
+      return value.sourceFilial && value.sourceFilial !== myFilial;
+    }).map(([key, value]) => {
+      const options = (transferableMap[value.item.cod] || [])
+        .filter((opt: any) => opt.filial !== value.item.filial.split(' - ')[0] && opt.saldo > 0)
         .sort((a: any, b: any) => b.saldo - a.saldo);
       
-      const chosenSource = sourceFilial || options[0]?.filial || '?';
+      const chosenSource = value.sourceFilial || options[0]?.filial || '?';
       const sourceData = options.find(o => o.filial === chosenSource);
 
       return { 
-        ...item, 
-        desiredQty: qty,
+        ...value.item, 
+        desiredQty: value.qty,
         sourceFilial: chosenSource,
         sourceSaldo: sourceData?.saldo || 0,
-        originReason: reason
+        originReason: value.reason,
+        cartKey: key
       };
     });
     
@@ -901,7 +1693,7 @@ function InventoryDashboardView({
                   </div>
                   <div>
                     <h3 className="text-lg font-black text-brand-text-primary tracking-tight uppercase">Origem da Transferência</h3>
-                    <p className="text-[10px] text-brand-text-secondary font-black tracking-widest opacity-60 uppercase font-mono">#{transferSelection.item.cod} • SELECIONE A FILIAL</p>
+                    <p className="text-[10px] text-brand-text-secondary font-black tracking-widest opacity-60 uppercase font-mono">#{transferSelection.item.cod} • SELECIONE AS FILIAIS</p>
                   </div>
                 </div>
                 <button onClick={() => setTransferSelection(null)} className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl transition-colors">
@@ -916,49 +1708,124 @@ function InventoryDashboardView({
                 </div>
 
                 <div className="flex items-center justify-between mb-4">
-                  <div className="text-[10px] font-black text-brand-text-secondary uppercase tracking-[0.2em] opacity-40">Filiais Disponíveis</div>
-                  <button 
-                    onClick={() => addToCart(transferSelection.item, transferSelection.qty, undefined, true)}
-                    className="flex items-center gap-2 px-4 py-2 bg-brand-red/10 text-brand-red border border-brand-red/20 rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-brand-red hover:text-white transition-all shadow-sm"
-                  >
-                    <ShoppingCart className="w-3.5 h-3.5" />
-                    REQUISITAR COMPRA
-                  </button>
+                  <div className="text-[10px] font-black text-brand-text-secondary uppercase tracking-[0.2em] opacity-40">Filiais Disponíveis (Selecione uma ou mais)</div>
                 </div>
                 
-                {transferSelection.options.map((opt, i) => (
-                  <button
-                    key={i}
-                    onClick={() => addToCart(transferSelection.item, transferSelection.qty, opt.filial)}
-                    className="w-full text-left p-4 rounded-2xl border border-brand-border hover:border-brand-green hover:bg-brand-green/[0.03] transition-all group flex items-center justify-between relative overflow-hidden"
-                  >
-                    {opt.total_mov === 0 && (
-                      <div className="absolute top-0 right-0 px-3 py-1 bg-brand-green text-white text-[7px] font-black rounded-bl-lg tracking-widest uppercase">
-                        SEM MOVIMENTAÇÃO
-                      </div>
-                    )}
-                    <div className="flex flex-col">
-                      <span className="text-[14px] font-black text-brand-text-primary group-hover:text-brand-green transition-colors uppercase tracking-tight">{opt.filial}</span>
-                      <div className="flex items-center gap-3 mt-1">
-                        <span className="text-[9px] font-black text-brand-text-secondary opacity-40 uppercase font-mono tracking-widest">Saldo: {opt.saldo.toLocaleString()}</span>
-                        <div className="w-1 h-1 rounded-full bg-brand-border" />
-                        <span className={`text-[9px] font-black uppercase font-mono tracking-widest ${opt.total_mov === 0 ? 'text-brand-green' : 'text-brand-text-secondary opacity-40'}`}>
-                          Mov 12M: {opt.total_mov.toLocaleString()}
-                        </span>
-                      </div>
+                <div className="space-y-2">
+                  {transferSelection.options.map((opt, i) => {
+                    const isSelected = selectedSources.includes(opt.filial);
+                    return (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => {
+                          setSelectedSources(prev => 
+                            prev.includes(opt.filial) 
+                              ? prev.filter(f => f !== opt.filial) 
+                              : [...prev, opt.filial]
+                          );
+                        }}
+                        className={`w-full text-left p-4 rounded-2xl border transition-all flex items-center justify-between relative overflow-hidden ${
+                          isSelected 
+                            ? 'border-brand-green bg-brand-green/[0.04]' 
+                            : 'border-brand-border hover:border-brand-green/30 hover:bg-gray-50 dark:hover:bg-white/[0.02]'
+                        }`}
+                      >
+                        {opt.total_mov === 0 && (
+                          <div className="absolute top-0 right-0 px-3 py-1 bg-brand-green text-white text-[7px] font-black rounded-bl-lg tracking-widest uppercase">
+                            SEM MOVIMENTAÇÃO
+                          </div>
+                        )}
+                        <div className="flex items-center gap-3">
+                          <div className={`w-5 h-5 rounded-md border flex items-center justify-center transition-colors ${
+                            isSelected 
+                              ? 'border-brand-green bg-brand-green text-white' 
+                              : 'border-brand-border bg-transparent'
+                          }`}>
+                            {isSelected && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                          </div>
+                          <div className="flex flex-col">
+                            <span className="text-[14px] font-black text-brand-text-primary uppercase tracking-tight">{opt.filial}</span>
+                            <div className="flex items-center gap-3 mt-1">
+                              <span className="text-[9px] font-black text-brand-text-secondary opacity-40 uppercase font-mono tracking-widest">Saldo: {opt.saldo.toLocaleString()}</span>
+                              <div className="w-1 h-1 rounded-full bg-brand-border" />
+                              <span className={`text-[9px] font-black uppercase font-mono tracking-widest ${opt.total_mov === 0 ? 'text-brand-green' : 'text-brand-text-secondary opacity-40'}`}>
+                                Mov 12M: {opt.total_mov.toLocaleString()}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                        <ArrowRight className="w-5 h-5 text-brand-text-secondary opacity-0 group-hover:opacity-100 group-hover:translate-x-1 transition-all" />
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {selectedSources.length > 0 && (
+                  <div className="p-5 rounded-2xl bg-zinc-50 dark:bg-black/20 border border-brand-border/60 space-y-3 mt-4">
+                    <span className="text-[9px] font-black text-brand-text-secondary uppercase tracking-[0.2em] opacity-40 block">Divisão de Transferência</span>
+                    <div className="space-y-2">
+                      {(() => {
+                        let remaining = transferSelection.qty;
+                        const itemsList: React.ReactNode[] = [];
+                        
+                        selectedSources.forEach(sourceName => {
+                          if (remaining <= 0) return;
+                          const o = transferSelection.options.find(opt => opt.filial === sourceName);
+                          if (o) {
+                            const taken = Math.min(remaining, o.saldo);
+                            if (taken > 0) {
+                              itemsList.push(
+                                <div key={sourceName} className="flex justify-between items-center text-xs font-bold text-brand-text-primary">
+                                  <span>{cleanFilialName(sourceName)}</span>
+                                  <span className="text-brand-blue font-black">{taken.toLocaleString()} <span className="text-[8px] text-gray-500">{transferSelection.item.un}</span></span>
+                                </div>
+                              );
+                              remaining -= taken;
+                            }
+                          }
+                        });
+
+                        if (remaining > 0) {
+                          itemsList.push(
+                            <div key="purchase-part" className="flex justify-between items-center text-xs font-bold text-brand-red">
+                              <span>Requisitar Compra (Falta)</span>
+                              <span className="font-black">{remaining.toLocaleString()} <span className="text-[8px]">{transferSelection.item.un}</span></span>
+                            </div>
+                          );
+                        }
+
+                        return itemsList;
+                      })()}
                     </div>
-                    <ArrowRight className="w-5 h-5 text-brand-text-secondary opacity-0 group-hover:opacity-100 group-hover:translate-x-1 transition-all" />
-                  </button>
-                ))}
+                  </div>
+                )}
               </div>
 
-              <div className="p-6 bg-black/[0.01] dark:bg-black/10 border-t border-brand-border flex justify-end">
+              <div className="p-6 bg-black/[0.01] dark:bg-black/10 border-t border-brand-border flex justify-between items-center">
                 <button 
                   onClick={() => setTransferSelection(null)}
                   className="px-6 py-2.5 text-[10px] font-black text-brand-text-secondary hover:text-brand-text-primary uppercase tracking-widest transition-colors"
                 >
                   CANCELAR
                 </button>
+                <div className="flex gap-2">
+                  {selectedSources.length === 0 ? (
+                    <button 
+                      onClick={() => addToCart(transferSelection.item, transferSelection.qty, undefined, true)}
+                      className="px-6 py-2.5 bg-brand-red/10 text-brand-red border border-brand-red/20 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-brand-red hover:text-white transition-all shadow-sm"
+                    >
+                      COMPRAR TUDO
+                    </button>
+                  ) : (
+                    <button 
+                      onClick={handleConfirmMultiTransfer}
+                      className="px-6 py-2.5 bg-brand-green text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-lg shadow-brand-green/20"
+                    >
+                      CONFIRMAR DIVISÃO ({selectedSources.length})
+                    </button>
+                  )}
+                </div>
               </div>
             </motion.div>
           </div>
@@ -1166,24 +2033,7 @@ function InventoryDashboardView({
                     </div>
                   )}
                   
-                  <div className="h-6 w-px bg-brand-border mx-2" />
-                  
-          <div className="flex bg-gray-100 dark:bg-black/20 border border-brand-border rounded-xl p-1 gap-1">
-            <button
-              onClick={() => setViewType('grid')}
-              className={`p-1.5 rounded-lg transition-all ${viewType === 'grid' ? 'bg-brand-blue text-white shadow-lg' : 'text-brand-text-secondary opacity-40 hover:opacity-100 dark:hover:opacity-80'}`}
-            >
-              <LayoutGrid className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => setViewType('table')}
-              className={`p-1.5 rounded-lg transition-all ${viewType === 'table' ? 'bg-brand-blue text-white shadow-lg' : 'text-brand-text-secondary opacity-40 hover:opacity-100 dark:hover:opacity-80'}`}
-            >
-              <TableProperties className="w-4 h-4" />
-            </button>
-          </div>
 
-                  <div className="h-6 w-px bg-brand-border mx-2" />
 
                   {(viewMode === 'standard' || viewMode === 'predictive') && (
                     <div className="flex items-center gap-1.5 p-1 bg-gray-100 dark:bg-black/40 rounded-2xl border border-brand-border/40 backdrop-blur-xl">
@@ -1248,7 +2098,27 @@ function InventoryDashboardView({
               </div>
             </div>
 
-        {viewMode === 'predictive' && (
+        {predictions.length === 0 && (
+          <div className="flex flex-col items-center justify-center py-32 px-10 text-center animate-in fade-in duration-700 bg-brand-card/20 rounded-[3rem] border border-brand-border/20 backdrop-blur-xl">
+            <div className="w-24 h-24 bg-brand-border/20 rounded-[2.5rem] flex items-center justify-center mb-8 border-2 border-brand-border/10">
+              <Search className="w-10 h-10 text-brand-text-secondary opacity-30" />
+            </div>
+            <h3 className="text-2xl font-black text-brand-text-primary uppercase tracking-tighter mb-4">Item não localizado na planilha.</h3>
+            <p className="text-brand-text-secondary max-w-sm font-medium opacity-60 leading-relaxed uppercase text-[10px] tracking-widest font-mono">
+              Não encontramos nenhum registro que corresponda aos filtros atuais ou ao termo de pesquisa digitado.
+            </p>
+            {filters.search && (
+               <button 
+                onClick={() => setFilters.setSearch('')}
+                className="mt-8 px-8 py-3 bg-brand-blue/10 text-brand-blue rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-brand-blue hover:text-white transition-all border border-brand-blue/20"
+               >
+                 Limpar Pesquisa
+               </button>
+            )}
+          </div>
+        )}
+
+        {predictions.length > 0 && viewMode === 'predictive' && (
           <motion.div 
             initial={{ opacity: 0, y: 15 }}
             animate={{ opacity: 1, y: 0 }}
@@ -1286,7 +2156,7 @@ function InventoryDashboardView({
                       whileInView={{ opacity: 1, scale: 1 }}
                       viewport={{ once: true }}
                       transition={{ delay: (idx % 12) * 0.02 }}
-                      key={`${r.cod}-${r.filial}`} 
+                      key={`${r.cod}-${r.filial}-${idx}`} 
                       onClick={() => setSelectedItem(r)}
                       className="group relative bg-white dark:bg-zinc-900 border border-brand-border/50 rounded-3xl overflow-hidden hover:border-brand-purple/30 transition-all cursor-pointer shadow-[0_4px_20px_rgba(0,0,0,0.03)] dark:shadow-none hover:shadow-2xl hover:shadow-brand-purple/5 flex flex-col h-full"
                     >
@@ -1394,7 +2264,7 @@ function InventoryDashboardView({
                             })}
                           />
                         </div>
-                        {cartItems[`${r.cod}-${r.filial}`] ? (
+                        {isItemInCart(r.cod, r.filial) ? (
                           <button 
                             className="flex-1 bg-brand-red text-white h-10 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all flex items-center justify-center gap-2 shadow-lg shadow-brand-red/20"
                             onClick={() => removeFromCart(`${r.cod}-${r.filial}`)}
@@ -1449,7 +2319,7 @@ function InventoryDashboardView({
                     </thead>
                     <tbody className="divide-y divide-white/5">
                       {predictions.slice(0, 100).map((r: any, idx: number) => (
-                        <tr key={`${r.cod}-${r.filial}`} 
+                        <tr key={`${r.cod}-${r.filial}-${idx}`} 
                           className="hover:bg-brand-purple/[0.03] transition-all group duration-300 cursor-pointer"
                           onClick={() => setSelectedItem(r)}
                         >
@@ -1533,7 +2403,7 @@ function InventoryDashboardView({
                                   {(transferableMap[r.cod] || [])
                                     .filter(opt => opt.filial !== r.filial.split(' - ')[0] && opt.saldo > 0)
                                     .map((opt, i) => {
-                                      const isSelected = cartItems[`${r.cod}-${r.filial}`]?.sourceFilial === opt.filial;
+                                      const isSelected = cartItems[`${r.cod}-${r.filial}`]?.sourceFilial === opt.filial || cartItems[`${r.cod}-${r.filial}-${opt.filial.split(' - ')[0]}`]?.sourceFilial === opt.filial;
                                       return (
                                         <button 
                                           key={i} 
@@ -1558,7 +2428,7 @@ function InventoryDashboardView({
                             </>
                           )}
                           <td className="px-4 py-4 text-center" onClick={(e) => e.stopPropagation()}>
-                            {cartItems[`${r.cod}-${r.filial}`] ? (
+                            {isItemInCart(r.cod, r.filial) ? (
                               <button 
                                 onClick={() => removeFromCart(`${r.cod}-${r.filial}`)}
                                 className="p-2 bg-brand-red/10 hover:bg-brand-red text-brand-red hover:text-white rounded-lg transition-all"
@@ -1669,8 +2539,8 @@ function InventoryDashboardView({
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-brand-border/5">
-                              {items.map((r: any) => (
-                                <tr key={`${r.cod}-${r.filial}`} className="hover:bg-brand-hover/40 transition-colors group">
+                              {items.map((r: any, idx: number) => (
+                                <tr key={`${r.cod}-${r.filial}-${idx}`} className="hover:bg-brand-hover/40 transition-colors group">
                                   <td className="px-4 py-3">
                                     <div className="text-[10px] font-black text-brand-text-primary uppercase group-hover:text-brand-blue transition-colors line-clamp-1 truncate max-w-[180px]">{r.desc}</div>
                                     <div className="text-[8px] font-mono text-brand-text-secondary opacity-60">#{r.cod}</div>
@@ -1792,8 +2662,8 @@ function InventoryDashboardView({
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-brand-border/5">
-                              {items.map((r: any) => (
-                                <tr key={`${r.cod}-${r.filial}`} className="hover:bg-brand-hover/40 transition-colors group">
+                              {items.map((r: any, idx: number) => (
+                                <tr key={`${r.cod}-${r.filial}-${idx}`} className="hover:bg-brand-hover/40 transition-colors group">
                                   <td className="px-4 py-3">
                                     <div className="text-[10px] font-black text-brand-text-primary uppercase group-hover:text-brand-blue transition-colors line-clamp-1 truncate max-w-[200px]">{r.desc}</div>
                                     <div className="text-[8px] font-mono text-brand-text-secondary opacity-60">#{r.cod}</div>
@@ -1801,8 +2671,8 @@ function InventoryDashboardView({
                                   <td className="px-4 py-3 text-center">
                                     <button 
                                       onClick={() => {
-                                        const originalItem = cartItems[`${r.cod}-${r.filial}`]?.item || r;
-                                        setTransferSelection({ item: originalItem, qty: r.desiredQty });
+                                        const originalItem = cartItems[r.cartKey || `${r.cod}-${r.filial}`]?.item || r;
+                                        setTransferSelection({ item: originalItem, qty: r.desiredQty, options: transferableMap[r.cod] || [] });
                                       }}
                                       className="px-2 py-0.5 bg-brand-green/10 text-brand-green text-[8px] font-black rounded border border-brand-green/20 uppercase hover:bg-brand-green hover:text-white transition-all flex items-center gap-1 mx-auto"
                                     >
@@ -1814,7 +2684,7 @@ function InventoryDashboardView({
                                   </td>
                                   <td className="px-4 py-3 text-center">
                                     <button 
-                                      onClick={() => removeFromCart(`${r.cod}-${r.filial}`)}
+                                      onClick={() => removeFromCart(r.cartKey || `${r.cod}-${r.filial}`)}
                                       className="p-1.5 bg-brand-red/10 text-brand-red rounded border border-brand-red/20 hover:bg-brand-red hover:text-white transition-all"
                                     >
                                       <X className="w-3 h-3" />
@@ -1830,7 +2700,7 @@ function InventoryDashboardView({
                             <button 
                               className="px-4 py-1.5 bg-brand-purple text-white text-[9px] font-black rounded-xl uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-lg shadow-brand-purple/20 flex items-center gap-2"
                               onClick={() => {
-                                setSeparationModal({ isOpen: true, destBranch, email: '' });
+                                setSeparationModal({ isOpen: true, destBranch, email: '', phone: '' });
                               }}
                             >
                               <ShieldCheck className="w-3.5 h-3.5" /> Confirmar Separação
@@ -2121,7 +2991,7 @@ function InventoryDashboardView({
                         whileInView={{ opacity: 1, scale: 1 }}
                         viewport={{ once: true }}
                         transition={{ delay: (idx % 12) * 0.02 }}
-                        key={`${r.cod}-${r.filial}`} 
+                        key={`${r.cod}-${r.filial}-${idx}`} 
                         onClick={() => setSelectedItem(r)}
                         className="group relative bg-white dark:bg-zinc-900 border border-brand-border/50 rounded-3xl overflow-hidden hover:border-brand-blue/30 transition-all cursor-pointer shadow-[0_4px_20px_rgba(0,0,0,0.03)] dark:shadow-none hover:shadow-2xl hover:shadow-brand-blue/5 flex flex-col h-full"
                       >
@@ -2218,7 +3088,7 @@ function InventoryDashboardView({
                                   .filter(opt => opt.filial !== r.filial.split(' - ')[0] && opt.saldo > 0)
                                   .slice(0, 4)
                                   .map((opt, i) => {
-                                    const isSelected = cartItems[`${r.cod}-${r.filial}`]?.sourceFilial === opt.filial;
+                                    const isSelected = cartItems[`${r.cod}-${r.filial}`]?.sourceFilial === opt.filial || cartItems[`${r.cod}-${r.filial}-${opt.filial.split(' - ')[0]}`]?.sourceFilial === opt.filial;
                                     return (
                                       <button 
                                         key={i} 
@@ -2261,7 +3131,7 @@ function InventoryDashboardView({
                             </div>
                           </div>
 
-                          {cartItems[`${r.cod}-${r.filial}`] ? (
+                          {isItemInCart(r.cod, r.filial) ? (
                             <button 
                               className="flex-1 bg-brand-red text-white h-10 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all flex items-center justify-center gap-2 shadow-lg shadow-brand-red/20"
                               onClick={() => removeFromCart(`${r.cod}-${r.filial}`)}
@@ -2315,7 +3185,7 @@ function InventoryDashboardView({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-brand-border">
-                        {actionFilteredData.map((r: any) => {
+                        {actionFilteredData.map((r: any, idx: number) => {
                           const color = CRIT_COLORS[r.statusSignal] || '#cbd5e1';
                           
                           // Clean filial name
@@ -2329,7 +3199,7 @@ function InventoryDashboardView({
 
                           return (
                             <tr 
-                              key={`${r.cod}-${r.filial}`} 
+                              key={`${r.cod}-${r.filial}-${idx}`} 
                               onClick={() => setSelectedItem(r)}
                               className="hover:bg-brand-blue/[0.03] transition-all cursor-pointer group"
                             >
@@ -2429,7 +3299,7 @@ function InventoryDashboardView({
                                       {others.length > 0 ? (
                                         <div className="flex flex-wrap gap-1 max-w-[250px]">
                                           {others.filter(o => o.saldo > 0).map((o, idx) => {
-                                            const isSelected = cartItems[`${r.cod}-${r.filial}`]?.sourceFilial === o.filial;
+                                            const isSelected = cartItems[`${r.cod}-${r.filial}`]?.sourceFilial === o.filial || cartItems[`${r.cod}-${r.filial}-${o.filial.split(' - ')[0]}`]?.sourceFilial === o.filial;
                                             return (
                                               <button 
                                                 key={idx} 
@@ -2457,7 +3327,7 @@ function InventoryDashboardView({
                                   </>
                                 )}
                                 <td className="px-4 py-3 text-center" onClick={(e) => e.stopPropagation()}>
-                                  {cartItems[`${r.cod}-${r.filial}`] ? (
+                                  {isItemInCart(r.cod, r.filial) ? (
                                     <button 
                                       onClick={() => removeFromCart(`${r.cod}-${r.filial}`)}
                                       className="p-1.5 bg-brand-red/10 text-brand-red rounded border border-brand-red/20 hover:bg-brand-red hover:text-white transition-all"
@@ -2513,18 +3383,7 @@ function InventoryDashboardView({
         )}
       </div>
 
-      <AnimatePresence>
-        {selectedItem && (
-          <ItemDetailModal 
-            item={selectedItem} 
-            data={data} 
-            onClose={() => setSelectedItem(null)} 
-            theme={theme}
-          />
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence>
+          <AnimatePresence>
         {separationModal?.isOpen && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-300">
             <motion.div 
@@ -2534,17 +3393,23 @@ function InventoryDashboardView({
               className="bg-white dark:bg-brand-card w-full max-w-md rounded-[2.5rem] border border-brand-border/20 shadow-2xl overflow-hidden"
             >
               <div className="p-8">
-                <div className="w-16 h-16 bg-brand-purple/10 rounded-3xl flex items-center justify-center mb-6 border border-brand-purple/20 shadow-inner">
-                  <Mail className="w-8 h-8 text-brand-purple" />
+                <div className="flex gap-4 mb-6">
+                  <div className="w-12 h-12 bg-brand-purple/10 rounded-2xl flex items-center justify-center border border-brand-purple/20 shadow-inner">
+                    <Mail className="w-6 h-6 text-brand-purple" />
+                  </div>
+                  <div className="w-12 h-12 bg-green-500/10 rounded-2xl flex items-center justify-center border border-green-500/20 shadow-inner">
+                    <MessageSquare className="w-6 h-6 text-green-500" />
+                  </div>
                 </div>
                 
                 <h3 className="text-xl font-black text-brand-text-primary uppercase tracking-tight mb-2">Enviar para Separação</h3>
-                <p className="text-sm text-brand-text-secondary mb-8">
-                  Deseja confirmar a separação para <span className="font-bold text-brand-purple">{separationModal.destBranch}</span>? 
-                  Informe um e-mail para envio da solicitação.
+                <p className="text-xs text-brand-text-secondary mb-6 leading-relaxed">
+                  Deseja confirmar a separação de materiais para <span className="font-bold text-brand-purple">{separationModal.destBranch}</span>? 
+                  Escolha enviar por <span className="font-bold text-brand-purple">E-mail</span> ou instantaneamente via <span className="font-bold text-green-500">WhatsApp</span>.
                 </p>
 
                 <div className="space-y-4">
+                  {/* Campo de E-mail */}
                   <div>
                     <label className="text-[10px] font-black text-brand-text-secondary uppercase tracking-widest ml-1 mb-2 block">E-mail de Destino</label>
                     <div className="relative group">
@@ -2559,27 +3424,101 @@ function InventoryDashboardView({
                       />
                     </div>
                   </div>
+
+                  {/* Campo de WhatsApp */}
+                  <div>
+                    <label className="text-[10px] font-black text-brand-text-secondary uppercase tracking-widest ml-1 mb-2 block">WhatsApp de Destino (Opcional)</label>
+                    <div className="relative group">
+                      <Phone className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-text-secondary group-focus-within:text-green-500 transition-colors" />
+                      <input 
+                        type="tel"
+                        placeholder="+55 (11) 99999-0000"
+                        className="w-full bg-black/5 dark:bg-white/5 border border-brand-border/10 h-14 rounded-2xl pl-12 pr-6 text-sm font-bold focus:border-green-500/50 focus:ring-4 focus:ring-green-500/5 outline-none transition-all placeholder:opacity-30"
+                        value={separationModal.phone}
+                        onChange={(e) => setSeparationModal({ ...separationModal, phone: e.target.value })}
+                      />
+                    </div>
+                    <p className="text-[9px] text-brand-text-secondary opacity-60 ml-1 mt-1 font-bold">
+                      Se deixado em branco, o WhatsApp abrirá para você selecionar o contato na hora de enviar.
+                    </p>
+                  </div>
+
+                  {/* Google Sheets Checkbox */}
+                  <div className="flex items-center gap-3 p-4 bg-brand-purple/5 dark:bg-brand-purple/10 border border-brand-purple/10 rounded-2xl mt-4">
+                    <input 
+                      type="checkbox"
+                      id="update-sheets-checkbox"
+                      className="w-5 h-5 rounded-md border-zinc-300 dark:border-zinc-700 text-brand-purple focus:ring-brand-purple focus:ring-opacity-20 cursor-pointer accent-brand-purple"
+                      checked={updateSheets}
+                      onChange={(e) => setUpdateSheets(e.target.checked)}
+                    />
+                    <label htmlFor="update-sheets-checkbox" className="text-xs font-bold text-brand-text-secondary cursor-pointer select-none">
+                      Atualizar planilha do Google Sheets automaticamente
+                    </label>
+                  </div>
                 </div>
 
-                <div className="flex gap-3 mt-10">
+                <div className="space-y-3 mt-8">
+                  <div className="flex gap-3">
+                    <button 
+                      type="button"
+                      disabled={isSendingEmail}
+                      onClick={() => handleConfirmAndSend('email')}
+                      className="flex-1 h-12 bg-brand-purple text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-lg shadow-brand-purple/30 flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+                    >
+                      {isSendingEmail ? (
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      ) : (
+                        <Send className="w-4 h-4" />
+                      )} 
+                      Via E-mail
+                    </button>
+
+                    <button 
+                      type="button"
+                      disabled={isSendingEmail}
+                      onClick={() => handleConfirmAndSend('whatsapp')}
+                      className="flex-1 h-12 bg-green-600 hover:bg-green-500 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest active:scale-95 transition-all shadow-lg shadow-green-600/30 flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+                    >
+                      <MessageSquare className="w-4 h-4" />
+                      Via WhatsApp
+                    </button>
+                  </div>
+
+                  {/* PDF or Excel Direct Option inside Separation Modal */}
+                  <div className="flex gap-3">
+                    <button 
+                      type="button"
+                      disabled={isSendingEmail}
+                      onClick={() => handleConfirmAndSend('pdf')}
+                      className="flex-1 h-12 bg-rose-600 hover:bg-rose-500 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest active:scale-95 transition-all shadow-lg shadow-rose-600/20 flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+                    >
+                      <FileText className="w-4 h-4" />
+                      Baixar PDF
+                    </button>
+
+                    <button 
+                      type="button"
+                      disabled={isSendingEmail}
+                      onClick={() => handleConfirmAndSend('excel')}
+                      className="flex-1 h-12 bg-emerald-600 hover:bg-emerald-500 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest active:scale-95 transition-all shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+                    >
+                      <FileSpreadsheet className="w-4 h-4" />
+                      Baixar Excel
+                    </button>
+                  </div>
+
+                  <p className="text-[9px] text-brand-text-secondary opacity-60 text-center font-bold px-4 py-1">
+                    Nota: O download conterá apenas os itens para separação desta filial ({separationModal.destBranch}).
+                  </p>
+
                   <button 
+                    type="button"
+                    disabled={isSendingEmail}
                     onClick={() => setSeparationModal(null)}
-                    className="flex-1 h-12 rounded-2xl text-[10px] font-black uppercase tracking-widest text-brand-text-secondary bg-black/5 dark:bg-white/5 hover:bg-black/10 transition-all border border-brand-border/10"
+                    className="w-full h-11 rounded-xl text-[10px] font-black uppercase tracking-widest text-brand-text-secondary bg-black/5 dark:bg-white/5 hover:bg-black/10 transition-all border border-brand-border/10 disabled:opacity-50 cursor-pointer"
                   >
                     Cancelar
-                  </button>
-                  <button 
-                    onClick={() => {
-                      if (!separationModal.email.includes('@')) {
-                        alert('Por favor, informe um e-mail válido.');
-                        return;
-                      }
-                      alert(`Solicitação de separação enviada com sucesso para ${separationModal.destBranch} e e-mail ${separationModal.email}!`);
-                      setSeparationModal(null);
-                    }}
-                    className="flex-1 h-12 bg-brand-purple text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-lg shadow-brand-purple/30 flex items-center justify-center gap-2"
-                  >
-                    <Send className="w-4 h-4" /> Confirmar e Enviar
                   </button>
                 </div>
               </div>
@@ -3053,7 +3992,12 @@ function FinanceDashboardView({
   );
 }
 
-export default function App() {
+function Dashboard() {
+  const { logout, user, profile, isAdmin } = useAuth();
+  const [activeModule, setActiveModule] = useState<Module>(() => {
+    const saved = localStorage.getItem('cortex-activeModule') as Module;
+    return ['dashboard', 'predictive', 'transfers', 'purchases', 'settings', 'users', 'audit', 'logs', 'permissions', 'integrations'].includes(saved) ? saved : 'dashboard';
+  });
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem('cortex-theme');
     if (saved === 'light' || saved === 'dark') return saved;
@@ -3074,9 +4018,104 @@ export default function App() {
     }
   }, [theme]);
 
-  const [screen, setScreen] = useState<Screen>('selection');
-  const [appMode, setAppMode] = useState<AppMode>('purchases');
-  const [data, setData] = useState<DashboardData | null>(null);
+  const [screen, setScreen] = useState<Screen>(() => {
+    const saved = localStorage.getItem('cortex-screen');
+    return (saved === 'selection' || saved === 'dashboard' || saved === 'processing' || saved === 'error') ? (saved as Screen) : 'dashboard';
+  });
+  const [appMode, setAppMode] = useState<AppMode>(() => {
+    const saved = localStorage.getItem('cortex-appMode') as AppMode;
+    return (saved === 'missing_items' || saved === 'purchases' || saved === 'sales') ? saved : 'missing_items';
+  });
+  const [loadingDrive, setLoadingDrive] = useState(false);
+
+  const [viewType, setViewType] = useState<'grid' | 'table'>(() => {
+    const saved = localStorage.getItem('cortex-viewType');
+    return (saved === 'grid' || saved === 'table') ? saved : 'table';
+  });
+
+  const adminRedirected = useRef(false);
+
+  useEffect(() => {
+    if (profile?.role === 'Admin Master' && !adminRedirected.current) {
+      adminRedirected.current = true;
+      setScreen('dashboard');
+      setActiveModule('dashboard');
+    }
+  }, [profile]);
+
+  useEffect(() => {
+    localStorage.setItem('cortex-viewType', viewType);
+  }, [viewType]);
+
+  useEffect(() => {
+    localStorage.setItem('cortex-screen', screen);
+  }, [screen]);
+
+  useEffect(() => {
+    localStorage.setItem('cortex-appMode', appMode);
+  }, [appMode]);
+
+  useEffect(() => {
+    localStorage.setItem('cortex-activeModule', activeModule);
+  }, [activeModule]);
+
+  const fetchDriveData = useCallback(async (isInitial = false) => {
+    const hasCache = !!localStorage.getItem('cortex_drive_cache_v1');
+    if (isInitial && !hasCache) {
+      setScreen('processing');
+    } else if (isInitial && hasCache) {
+      // If we have cached data, load silently and ensure screen is dashboard
+      setScreen('dashboard');
+    }
+    setLoadingDrive(true);
+    
+    try {
+      const newData = await carregarPlanilha();
+      if (newData) {
+        setData(newData);
+        if (isInitial) setScreen('dashboard');
+      } else if (isInitial && !hasCache) {
+        setError('Falha crítica ao conectar com o Google Drive. Verifique a conexão e se o arquivo (CSV ou XLSX) está público.');
+        setScreen('error');
+      }
+    } catch (err) {
+      console.error('Refresh Error:', err);
+      if (isInitial && !hasCache) {
+        setError('Erro inesperado ao carregar dados remotos.');
+        setScreen('error');
+      }
+    } finally {
+      setLoadingDrive(false);
+    }
+  }, []);
+
+  const [data, setData] = useState<DashboardData | null>(() => {
+    try {
+      const cached = localStorage.getItem('cortex_drive_cache_v1');
+      if (cached) {
+        console.log("Restores cached inventory data instantly on startup for super fast loading!");
+        return JSON.parse(cached);
+      }
+    } catch (e) {
+      console.warn("Could not parse cached data from localStorage:", e);
+    }
+    return null;
+  });
+
+  useEffect(() => {
+    if (appMode === 'missing_items') {
+      // ONLY trigger initial remote fetch if data is not already loaded in memory to prevent slow tab switches
+      if (!data) {
+        fetchDriveData(true);
+      }
+
+      const interval = setInterval(() => {
+        fetchDriveData(false);
+      }, 86400000); // 24 hours
+
+      return () => clearInterval(interval);
+    }
+  }, [appMode, fetchDriveData, data]);
   const [error, setError] = useState<string | null>(null);
   const [processingStep, setProcessingStep] = useState(0);
   
@@ -3088,8 +4127,55 @@ export default function App() {
   const [filterGroup, setFilterGroup] = useState<string>('');
   const [filterFab, setFilterFab] = useState<string>('');
   const [searchTerm, setSearchTerm] = useState<string>('');
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+
+  useEffect(() => {
+    localStorage.setItem('cortex-filterGroup', filterGroup);
+  }, [filterGroup]);
+
+  useEffect(() => {
+    localStorage.setItem('cortex-filterFab', filterFab);
+  }, [filterFab]);
+
+  useEffect(() => {
+    localStorage.setItem('cortex-searchTerm', searchTerm);
+  }, [searchTerm]);
+
   const [filterCriterio, setFilterCriterio] = useState<string>('');
   const [filterABC, setFilterABC] = useState<string>('');
+
+  useEffect(() => {
+    localStorage.setItem('cortex-filterCriterio', filterCriterio);
+  }, [filterCriterio]);
+
+  useEffect(() => {
+    localStorage.setItem('cortex-filterABC', filterABC);
+  }, [filterABC]);
+
+  // Clean all filters, searches, and branches when changing views, changing dashboards, or refreshing the page
+  useEffect(() => {
+    if (filterPartner !== '') setFilterPartner('');
+    if (filterGroup !== '') setFilterGroup('');
+    if (filterFab !== '') setFilterFab('');
+    if (searchTerm !== '') setSearchTerm('');
+    if (debouncedSearchTerm !== '') setDebouncedSearchTerm('');
+    if (filterCriterio !== '') setFilterCriterio('');
+    if (filterABC !== '') setFilterABC('');
+    if (selectedFiliais.length > 0) setSelectedFiliais([]);
+    
+    localStorage.removeItem('cortex-filterGroup');
+    localStorage.removeItem('cortex-filterFab');
+    localStorage.removeItem('cortex-searchTerm');
+    localStorage.removeItem('cortex-filterCriterio');
+    localStorage.removeItem('cortex-filterABC');
+  }, [activeModule, appMode, screen]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearchTerm(searchTerm);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [searchTerm]);
   const [selectedPartnerDetails, setSelectedPartnerDetails] = useState<string | null>(null);
   const [selectedGroupDetails, setSelectedGroupDetails] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -3203,11 +4289,60 @@ export default function App() {
   };
 
   const onToggleFilial = (filial: string) => {
-    setSelectedFiliais(prev => 
-      prev.includes(filial) 
-        ? prev.filter(f => f !== filial) 
-        : [...prev, filial]
-    );
+    setSelectedFiliais(prev => {
+      const id = getBranchId(filial);
+      const exists = prev.some(f => getBranchId(f) === id);
+      if (exists) {
+        return prev.filter(f => getBranchId(f) !== id);
+      } else {
+        return [...prev, filial];
+      }
+    });
+  };
+
+  const expandUnitAbbreviation = (un: string): string => {
+    if (!un) return 'Unidade';
+    const clean = un.trim().toUpperCase();
+    const mapper: Record<string, string> = {
+      'UN': 'Unidade',
+      'UND': 'Unidade',
+      'CX': 'Caixa',
+      'CAIXA': 'Caixa',
+      'FD': 'Fardo',
+      'FARDO': 'Fardo',
+      'PCT': 'Pacote',
+      'PACOTE': 'Pacote',
+      'PT': 'Pacote',
+      'KG': 'Quilograma',
+      'KILO': 'Quilograma',
+      'QUILOGRAMA': 'Quilograma',
+      'LT': 'Litro',
+      'LITRO': 'Litro',
+      'PAR': 'Par',
+      'DZ': 'Dúzia',
+      'DUZIA': 'Dúzia',
+      'PC': 'Peça',
+      'PEÇA': 'Peça',
+      'M': 'Metro',
+      'MT': 'Metro',
+      'METRO': 'Metro',
+      'RL': 'Rolo',
+      'ROLO': 'Rolo',
+      'SC': 'Saca',
+      'SACA': 'Saca',
+      'FR': 'Frasco',
+      'FRASCO': 'Frasco',
+      'BD': 'Balde',
+      'BALDE': 'Balde',
+      'GL': 'Galão',
+      'GALAO': 'Galão',
+      'BG': 'Bisnaga',
+      'BISNAGA': 'Bisnaga',
+      'CJ': 'Conjunto',
+      'CONJUNTO': 'Conjunto',
+      'MIL': 'Milheiro'
+    };
+    return mapper[clean] || un;
   };
 
   const handleExportExcel = (items: any[], type: string) => {
@@ -3232,14 +4367,14 @@ export default function App() {
             'Produto': r.desc,
             'Grupo': r.grupo,
             'Curva': r.curva,
-            'Unidade': r.un,
+            'Unidade': expandUnitAbbreviation(r.un),
             'Filial Origem': r.sourceFilial,
             'Saldo Origem': r.sourceSaldo || 0,
             'Filial Destino': r.filial.split(' - ')[0],
             'Saldo Destino': r.saldo,
-            'Qtd Recomendada': r.recommendedTransferQty || 0,
-            'Qtd Desejada': r.desiredQty || 0,
-            'Status': r.transferStatusLabel || 'Transferível',
+            'Quantidade Recomendada': r.recommendedTransferQty || 0,
+            'Quantidade Desejada': r.desiredQty || 0,
+            'Status': (r.transferStatusLabel || 'Transferível').replace('Parcial', 'Parcial').replace('TRANSF. INSUF.', 'Transferência Insuficiente'),
             'Observação': r.transferJustification || '',
             'Compra Complementar': r.transferStatusLabel?.includes('Compra') ? 'SIM' : 'NÃO'
           });
@@ -3261,11 +4396,11 @@ export default function App() {
             'Código': r.cod,
             'Produto': r.desc,
             'Filial': r.filial.split(' - ')[0],
-            'Unidade': r.un,
+            'Unidade': expandUnitAbbreviation(r.un),
             'Saldo Atual': r.saldo,
-            'Qtd Sugerida': r.suggestedPurchase,
-            'Qtd Desejada': r.desiredQty,
-            'Qtd Aprovada': r.desiredQty,
+            'Quantidade Sugerida': r.suggestedPurchase,
+            'Quantidade Desejada': r.desiredQty,
+            'Quantidade Aprovada': r.desiredQty,
             'Origem da Necessidade': r.transferStatusLabel?.includes('Parcial') ? 'Transferência Insuficiente' : r.statusSignal || 'Ruptura',
             'Curva': r.curva,
             'Status': r.statusSignal
@@ -3324,7 +4459,7 @@ export default function App() {
 
         autoTable(doc, {
           startY: currentY,
-          head: [['CÓD.', 'PRODUTO', 'GRUPO', 'CRV.', 'SLD. OR.', 'SLD. DE.', 'REC.', 'DES.', 'STATUS']],
+          head: [['CÓDIGO', 'PRODUTO', 'GRUPO', 'CURVA', 'SALDO ORIGEM', 'SALDO DESTINO', 'RECOMENDADO', 'DESEJADO', 'STATUS']],
           body: groupItems.map(r => [
             r.cod, 
             r.desc, 
@@ -3334,7 +4469,7 @@ export default function App() {
             r.saldo, 
             r.recommendedTransferQty || 0, 
             r.desiredQty || 0, 
-            r.transferStatusLabel || 'OK'
+            (r.transferStatusLabel || 'OK').replace('Parcial', 'Parcial').replace('TRANSF. INSUF.', 'Transferência Insuficiente')
           ]),
           theme: 'grid',
           headStyles: { fillColor: [59, 130, 246], textColor: [255, 255, 255], fontSize: 6, halign: 'center' },
@@ -3344,11 +4479,11 @@ export default function App() {
             1: { cellWidth: 55, halign: 'left' },
             2: { cellWidth: 30, halign: 'left' },
             3: { cellWidth: 10 },
-            4: { cellWidth: 15 },
-            5: { cellWidth: 15 },
-            6: { cellWidth: 15 },
-            7: { cellWidth: 15 },
-            8: { cellWidth: 25 }
+            4: { cellWidth: 20 },
+            5: { cellWidth: 20 },
+            6: { cellWidth: 35 },
+            7: { cellWidth: 35 },
+            8: { cellWidth: 35 }
           }
         });
         currentY = (doc as any).lastAutoTable.finalY + 12;
@@ -3377,16 +4512,24 @@ export default function App() {
 
         autoTable(doc, {
           startY: currentY,
-          head: [['CÓD.', 'PRODUTO', 'FILIAL', 'SALDO ATUAL', 'SUGESTÃO', 'QTD. COMPRA', 'ORIGEM NECESSIDADE']],
+          head: [['CÓDIGO', 'PRODUTO', 'FILIAL', 'SALDO ATUAL', 'SUGESTÃO', 'QUANTIDADE COMPRA', 'ORIGEM DA NECESSIDADE']],
           body: groupItems.map(r => [
             r.cod, r.desc, r.filial.split(' - ')[0], r.saldo.toLocaleString(), 
             r.suggestedPurchase.toLocaleString(), r.desiredQty?.toLocaleString(), 
-            r.transferStatusLabel?.includes('Parcial') ? 'TRANSF. INSUF.' : r.statusSignal || 'RUPTURA'
+            r.transferStatusLabel?.includes('Parcial') ? 'TRANSFERÊNCIA INSUFICIENTE' : r.statusSignal || 'RUPTURA'
           ]),
           theme: 'grid',
           headStyles: { fillColor: [220, 38, 38], textColor: [255, 255, 255], fontSize: 8, halign: 'center' },
           styles: { fontSize: 8, cellPadding: 3, halign: 'center' },
-          columnStyles: { 1: { cellWidth: 90, halign: 'left' } }
+          columnStyles: { 
+            0: { cellWidth: 20 },
+            1: { cellWidth: 80, halign: 'left' },
+            2: { cellWidth: 25 },
+            3: { cellWidth: 25 },
+            4: { cellWidth: 25 },
+            5: { cellWidth: 35 },
+            6: { cellWidth: 45 }
+          }
         });
         currentY = (doc as any).lastAutoTable.finalY + 12;
       });
@@ -3476,11 +4619,153 @@ export default function App() {
     };
   }, [data?.inventoryRecords]);
 
+  const currentMonthIdx = useMemo(() => {
+    if (!data?.inventoryRecords) return 0;
+    let lastMonthIdx = 0;
+    for (let i = 11; i >= 0; i--) {
+      const sum = data.inventoryRecords.slice(0, 500).reduce((acc: number, r: any) => acc + (r.meses[i] || 0), 0);
+      if (sum > 0) { lastMonthIdx = i; break; }
+    }
+    return (lastMonthIdx + 1) % 12;
+  }, [data?.inventoryRecords]);
+
+  const enrichedInventoryRecords = useMemo(() => {
+    if (!data?.inventoryRecords) return [];
+    
+    return data.inventoryRecords.map((r: any) => {
+      // Exclude items with no stock and no movement from intelligence
+      if (r.saldo <= 0 && r.total_mov === 0) return null;
+
+      const avg = r.total_mov / 12;
+      let last3 = 0, prev3 = 0;
+      for (let i = 1; i <= 3; i++) {
+        last3 += r.meses[(currentMonthIdx - i + 12) % 12] || 0;
+        prev3 += r.meses[(currentMonthIdx - i - 3 + 12) % 12] || 0;
+      }
+
+      const trend = prev3 > 0 ? (last3 / prev3) - 1 : 0;
+      const trendFactor = 1 + Math.max(-0.5, Math.min(0.5, trend));
+      
+      let totalProjected = 0;
+      const projectedDemand = [];
+      for (let i = 0; i < 4; i++) {
+        const val = r.meses[(currentMonthIdx + i) % 12] !== undefined ? r.meses[(currentMonthIdx + i) % 12] : avg;
+        const demand = avg > 0 ? (val / avg) * avg * trendFactor : avg * trendFactor;
+        projectedDemand.push(demand);
+        totalProjected += demand;
+      }
+
+      const targetStock = totalProjected * 1.2; 
+      const minStockOrigin = avg * 2.5;
+      const availableSurplus = Math.max(0, Math.floor(r.saldo - minStockOrigin));
+      
+      const suggestedPurchase = Math.max(0, Math.ceil(targetStock - r.saldo));
+      const coverage = avg > 0 ? r.saldo / (avg * trendFactor) : (r.saldo > 0 ? 99 : 0);
+
+      let statusSignal = 'SAUDÁVEL';
+      if (r.total_mov === 0 && r.saldo > 0) statusSignal = 'SEM_MOVIMENTO';
+      else if (r.total_mov === 0 && r.saldo <= 0) statusSignal = 'SEM_DEMANDA';
+      else if (coverage < 0.5 && r.total_mov > 0) statusSignal = 'RUPTURA';
+      else if (coverage < 1.2 && r.total_mov > 0) statusSignal = 'REPOSIÇÃO';
+      else if (r.saldo > r.total_mov) statusSignal = 'EXCESSO';
+
+      const others = (transferableMap[r.cod] || []).filter(opt => opt.filial !== r.filial.split(' - ')[0]);
+      const transferables = others.map(o => ({
+        ...o,
+        surplus: Math.max(0, Math.floor(o.saldo - (o.total_mov / 12) * 2.5))
+      })).filter(o => o.surplus > 0);
+      
+      const totalNetworkSurplus = transferables.reduce((acc, curr) => acc + curr.surplus, 0);
+      const hasTransfer = totalNetworkSurplus > 0;
+      const hasDemandElsewhere = others.some(o => o.total_mov > 0);
+
+      let transferIdealFilial = '-';
+      let recommendedTransferQty = 0;
+      let transferJustification = '-';
+      let transferDirection: 'ENTRADA' | 'SAIDA' | 'NENHUMA' = 'NENHUMA';
+      let transferStatusLabel = '';
+      let saldoDestino = 0;
+
+      const isLocalNeed = (['RUPTURA', 'REPOSIÇÃO'].includes(statusSignal) || (suggestedPurchase > 0 && statusSignal === 'SAUDÁVEL')) && r.total_mov > 0;
+      if (isLocalNeed && hasTransfer) {
+        transferDirection = 'ENTRADA';
+        const bestSource = transferables[0]; 
+        transferIdealFilial = bestSource.filial;
+        recommendedTransferQty = Math.min(suggestedPurchase, totalNetworkSurplus);
+        
+        if (recommendedTransferQty < suggestedPurchase) {
+          transferStatusLabel = 'Transferência Parcial + Compra';
+        } else {
+          transferStatusLabel = 'Direcionado para Transferência';
+        }
+        
+        transferJustification = recommendedTransferQty < suggestedPurchase
+          ? `Necessidade: ${suggestedPurchase}. Sobra rede: ${totalNetworkSurplus}. Compra complementar: ${suggestedPurchase - totalNetworkSurplus}.`
+          : `Item em ${statusSignal.toLowerCase()}. Sobra disponível na rede.`;
+        
+        saldoDestino = r.saldo;
+      }
+      else if ((statusSignal === 'SEM_MOVIMENTO' || statusSignal === 'EXCESSO') && hasDemandElsewhere && availableSurplus > 0) {
+        transferDirection = 'SAIDA';
+        const destinations = others.filter(o => o.total_mov > 0).sort((a, b) => b.total_mov - a.total_mov);
+        const bestDest = destinations[0];
+        transferIdealFilial = bestDest.filial;
+        const destNeed = Math.ceil((bestDest.total_mov / 12) * 4);
+        recommendedTransferQty = Math.min(availableSurplus, destNeed);
+        
+        transferJustification = statusSignal === 'SEM_MOVIMENTO' 
+          ? `Item sem giro local (Saldo: ${r.saldo}). Demanda em ${bestDest.filial}.`
+          : `Excesso detectado (Min: ${Math.round(minStockOrigin)}). Enviando excedente para ${bestDest.filial}.`;
+        
+        saldoDestino = bestDest.saldo;
+        transferStatusLabel = 'Redistribuição de Excedente';
+      }
+
+      const transferBalance = transferables.reduce((acc, curr) => acc + curr.surplus, 0);
+
+      return { 
+        ...r, 
+        _normCod: normalizeString(r.cod),
+        _normDesc: normalizeString(r.desc),
+        _normFab: normalizeString(r.fab),
+        _normGrupo: normalizeString(r.grupo),
+        suggestedPurchase, 
+        totalProjected, 
+        coverage, 
+        trend, 
+        statusSignal, 
+        projectedDemand, 
+        hasTransfer, 
+        transferBalance, 
+        hasDemandElsewhere,
+        transferIdealFilial,
+        recommendedTransferQty,
+        transferJustification,
+        transferDirection,
+        transferStatusLabel,
+        availableSurplus,
+        saldoDestino,
+        totalNetworkSurplus
+      };
+    }).filter(Boolean);
+  }, [data?.inventoryRecords, transferableMap, currentMonthIdx]);
+
   const filteredData = useMemo(() => {
     if (!data) return null;
 
-    if ((appMode === 'missing_items') && data.inventoryRecords) {
-      const lowerSearch = searchTerm?.toLowerCase();
+    if ((appMode === 'missing_items')) {
+      const lowerSearch = debouncedSearchTerm?.toLowerCase().trim();
+      const normSearch = lowerSearch ? normalizeString(debouncedSearchTerm) : '';
+      
+      const hasExactCodeMatch = normSearch ? enrichedInventoryRecords.some((r: any) => {
+        const normCod = r._normCod || normalizeString(r.cod);
+        return normCod === normSearch;
+      }) : false;
+
+      const hasExactDescMatch = normSearch ? enrichedInventoryRecords.some((r: any) => {
+        const normDesc = r._normDesc || normalizeString(r.desc);
+        return normDesc === normSearch;
+      }) : false;
       
       const processedBase = [];
       const criteriaCounts = { ALL: 0, COMPRA: 0, TRANSFERENCIA: 0, URGENTE: 0, COMPRAR_JA: 0, COMPRAR_BREVE: 0, OK: 0, ESTOQUE_ALTO: 0, SEM_MOVIMENTO: 0 };
@@ -3510,141 +4795,47 @@ export default function App() {
       const filialStats: Record<string, { skus: number, stock: number, skusWithStock: number, totalMatching: number }> = {};
       data.filiais.forEach(f => filialStats[f] = { totalMatching: 0, skus: 0, stock: 0, skusWithStock: 0 });
 
-      // Calculate currentMonthIdx once
-      let lastMonthIdx = 0;
-      for (let i = 11; i >= 0; i--) {
-        const sum = data.inventoryRecords.slice(0, 500).reduce((acc: number, r: any) => acc + (r.meses[i] || 0), 0);
-        if (sum > 0) { lastMonthIdx = i; break; }
-      }
-      const currentMonthIdx = (lastMonthIdx + 1) % 12;
-
-      for (const r of data.inventoryRecords) {
-        // Exclude items with no stock and no movement from intelligence
-        if (r.saldo <= 0 && r.total_mov === 0) continue;
-
+      for (const r of enrichedInventoryRecords) {
         if (filterGroup && r.grupo !== filterGroup) continue;
         if (filterFab && r.fab !== filterFab) continue;
         if (filterABC && r.curva !== filterABC) continue;
-        if (lowerSearch) {
-          const match = r.cod.toLowerCase().includes(lowerSearch) || 
-                        r.desc.toLowerCase().includes(lowerSearch) ||
-                        r.fab.toLowerCase().includes(lowerSearch) ||
-                        (r.grupo || '').toLowerCase().includes(lowerSearch);
-          if (!match) continue;
-        }
 
-        const avg = r.total_mov / 12;
-        let last3 = 0, prev3 = 0;
-        for (let i = 1; i <= 3; i++) {
-          last3 += r.meses[(currentMonthIdx - i + 12) % 12] || 0;
-          prev3 += r.meses[(currentMonthIdx - i - 3 + 12) % 12] || 0;
-        }
-
-        const trend = prev3 > 0 ? (last3 / prev3) - 1 : 0;
-        const trendFactor = 1 + Math.max(-0.5, Math.min(0.5, trend));
-        
-        let totalProjected = 0;
-        const projectedDemand = [];
-        for (let i = 0; i < 4; i++) {
-          const val = r.meses[(currentMonthIdx + i) % 12] !== undefined ? r.meses[(currentMonthIdx + i) % 12] : avg;
-          const demand = avg > 0 ? (val / avg) * avg * trendFactor : avg * trendFactor;
-          projectedDemand.push(demand);
-          totalProjected += demand;
-        }
-
-        const targetStock = totalProjected * 1.2; 
-        const minStockOrigin = avg * 2.5; // Ensure origin keeps 2.5 months of coverage
-        const availableSurplus = Math.max(0, Math.floor(r.saldo - minStockOrigin));
-        
-        const suggestedPurchase = Math.max(0, Math.ceil(targetStock - r.saldo));
-        const coverage = avg > 0 ? r.saldo / (avg * trendFactor) : (r.saldo > 0 ? 99 : 0);
-
-        let statusSignal = 'SAUDÁVEL';
-        if (r.total_mov === 0 && r.saldo > 0) statusSignal = 'SEM_MOVIMENTO';
-        else if (r.total_mov === 0 && r.saldo <= 0) statusSignal = 'SEM_DEMANDA';
-        else if (coverage < 0.5 && r.total_mov > 0) statusSignal = 'RUPTURA';
-        else if (coverage < 1.2 && r.total_mov > 0) statusSignal = 'REPOSIÇÃO';
-        else if (r.saldo > r.total_mov) statusSignal = 'EXCESSO';
-
-        const others = (transferableMap[r.cod] || []).filter(opt => opt.filial !== r.filial.split(' - ')[0]);
-        // Refine transferables based on surplus rule
-        const transferables = others.map(o => ({
-          ...o,
-          surplus: Math.max(0, Math.floor(o.saldo - (o.total_mov / 12) * 2.5))
-        })).filter(o => o.surplus > 0);
-        
-        const totalNetworkSurplus = transferables.reduce((acc, curr) => acc + curr.surplus, 0);
-        const hasTransfer = totalNetworkSurplus > 0;
-        const hasDemandElsewhere = others.some(o => o.total_mov > 0);
-
-        let transferIdealFilial = '-';
-        let recommendedTransferQty = 0;
-        let transferJustification = '-';
-        let transferDirection: 'ENTRADA' | 'SAIDA' | 'NENHUMA' = 'NENHUMA';
-        let transferStatusLabel = '';
-        let saldoDestino = 0;
-
-        // Case 1: Need in current branch (ENTRADA)
-        const isLocalNeed = (['RUPTURA', 'REPOSIÇÃO'].includes(statusSignal) || (suggestedPurchase > 0 && statusSignal === 'SAUDÁVEL')) && r.total_mov > 0;
-        if (isLocalNeed && hasTransfer) {
-          transferDirection = 'ENTRADA';
-          const bestSource = transferables[0]; 
-          transferIdealFilial = bestSource.filial;
-          recommendedTransferQty = Math.min(suggestedPurchase, totalNetworkSurplus);
+        let searchScore = 0;
+        if (normSearch) {
+          const normCod = (r as any)._normCod || normalizeString(r.cod);
+          const normDesc = (r as any)._normDesc || normalizeString(r.desc);
+          const normFab = (r as any)._normFab || normalizeString(r.fab);
+          const normGrupo = (r as any)._normGrupo || normalizeString(r.grupo);
           
-          if (recommendedTransferQty < suggestedPurchase) {
-            transferStatusLabel = 'Transferência Parcial + Compra';
+          if (hasExactCodeMatch) {
+            if (normCod === normSearch) {
+              searchScore = 1000;
+            } else {
+              continue;
+            }
+          } else if (hasExactDescMatch) {
+            if (normDesc === normSearch) {
+              searchScore = 1000;
+            } else {
+              continue;
+            }
           } else {
-            transferStatusLabel = 'Direcionado para Transferência';
+            // 1º → Correspondência exata do “N° do item”
+            if (normCod === normSearch) searchScore = 1000;
+            // 2º → Correspondência parcial do “N° do item”
+            else if (normCod.startsWith(normSearch)) searchScore = 800;
+            else if (normCod.includes(normSearch)) searchScore = 600;
+            // 3º → Correspondência exata da “Descrição do item”
+            else if (normDesc === normSearch) searchScore = 400;
+            // 4º → Correspondência parcial da “Descrição do item”
+            else if (normDesc.startsWith(normSearch)) searchScore = 300;
+            else if (normDesc.includes(normSearch)) searchScore = 200;
+            // 5º → Correspondência aproximada / outros campos
+            else if (normFab.includes(normSearch) || normGrupo.includes(normSearch)) searchScore = 50;
+            
+            if (searchScore === 0) continue;
           }
-          
-          transferJustification = recommendedTransferQty < suggestedPurchase
-            ? `Necessidade: ${suggestedPurchase}. Sobra rede: ${totalNetworkSurplus}. Compra complementar: ${suggestedPurchase - totalNetworkSurplus}.`
-            : `Item em ${statusSignal.toLowerCase()}. Sobra disponível na rede.`;
-          
-          saldoDestino = r.saldo;
         }
-        // Case 2: Stagnant/Excess in current branch (SAIDA)
-        else if ((statusSignal === 'SEM_MOVIMENTO' || statusSignal === 'EXCESSO') && hasDemandElsewhere && availableSurplus > 0) {
-          transferDirection = 'SAIDA';
-          const destinations = others.filter(o => o.total_mov > 0).sort((a, b) => b.total_mov - a.total_mov);
-          const bestDest = destinations[0];
-          transferIdealFilial = bestDest.filial;
-          
-          // Recommend moving the surplus, but limited by what the destination typically needs (4 months)
-          const destNeed = Math.ceil((bestDest.total_mov / 12) * 4);
-          recommendedTransferQty = Math.min(availableSurplus, destNeed);
-          
-          transferJustification = statusSignal === 'SEM_MOVIMENTO' 
-            ? `Item sem giro local (Saldo: ${r.saldo}). Demanda em ${bestDest.filial}.`
-            : `Excesso detectado (Min: ${Math.round(minStockOrigin)}). Enviando excedente para ${bestDest.filial}.`;
-          
-          saldoDestino = bestDest.saldo;
-          transferStatusLabel = 'Redistribuição de Excedente';
-        }
-
-        const transferBalance = transferables.reduce((acc, curr) => acc + curr.surplus, 0);
-
-        const processedItem = { 
-          ...r, 
-          suggestedPurchase, 
-          totalProjected, 
-          coverage, 
-          trend, 
-          statusSignal, 
-          projectedDemand, 
-          hasTransfer, 
-          transferBalance, 
-          hasDemandElsewhere,
-          transferIdealFilial,
-          recommendedTransferQty,
-          transferJustification,
-          transferDirection,
-          transferStatusLabel,
-          availableSurplus,
-          saldoDestino,
-          totalNetworkSurplus
-        };
 
         if (filialStats[r.filial]) {
           filialStats[r.filial].totalMatching++;
@@ -3653,8 +4844,9 @@ export default function App() {
           if (r.saldo > 0) filialStats[r.filial].skusWithStock++;
         }
 
-        const isBranchMatch = selectedFiliais.length === 0 || selectedFiliais.includes(r.filial);
+        const isBranchMatch = selectedFiliais.length === 0 || selectedFiliais.some(f => getBranchId(f) === getBranchId(r.filial));
         if (isBranchMatch) {
+          const { statusSignal, suggestedPurchase, hasTransfer, transferDirection, coverage } = r;
           let pass = true;
           if (filterCriterio) {
             const act = (['RUPTURA', 'REPOSIÇÃO'].includes(statusSignal) || (suggestedPurchase > 0 && statusSignal === 'SAUDÁVEL')) && r.total_mov > 0;
@@ -3668,7 +4860,9 @@ export default function App() {
             else if (filterCriterio === 'SEM_MOVIMENTO') pass = statusSignal === 'SEM_MOVIMENTO';
           }
           
-          if (pass) processedBase.push(processedItem);
+          if (pass) {
+            processedBase.push({ ...r, _searchScore: searchScore });
+          }
 
           criteriaCounts.ALL++;
           const act = (['RUPTURA', 'REPOSIÇÃO'].includes(statusSignal) || (suggestedPurchase > 0 && statusSignal === 'SAUDÁVEL')) && r.total_mov > 0;
@@ -3706,7 +4900,9 @@ export default function App() {
 
       return {
         inventory: {
-          filtered: processedBase,
+          filtered: normSearch 
+            ? processedBase.sort((a, b) => b._searchScore - a._searchScore)
+            : processedBase,
           counts: criteriaCounts,
           critDistribution: Object.entries(criteriaCounts).filter(([n]) => !['ALL', 'COMPRA', 'TRANSFERENCIA'].includes(n)).map(([name, value]) => ({ name, value })),
           abcData: Object.entries(abcMetrics).map(([name, data]) => ({ name, items: data.items, mov: data.mov })),
@@ -3732,7 +4928,8 @@ export default function App() {
 
     const res = { total: 0, nfs: new Set(), partners: new Set(), totalVolume: 0, items: new Set(), partnerAgg: {} as any, groupAgg: {} as any, filialAgg: {} as any, monthly: Array.from({ length: 12 }, (_, i) => ({ name: MONTH_NAMES[i], value: 0 })) };
     (data.records || []).forEach(r => {
-      const match = (selectedFiliais.length === 0 || selectedFiliais.includes(r.filial)) && 
+      const isBranchMatch = selectedFiliais.length === 0 || selectedFiliais.some(f => getBranchId(f) === getBranchId(r.filial));
+      const match = isBranchMatch && 
                     (!filterPartner || r.parceiro === filterPartner) && 
                     (!filterGroup || r.grupo === filterGroup) &&
                     (!filterFab || r.fab === filterFab);
@@ -3779,165 +4976,235 @@ export default function App() {
       availableGroups,
       availableFabs
     };
-  }, [data, appMode, filterPartner, filterGroup, filterFab, filterCriterio, filterABC, searchTerm, selectedFiliais, staticInventoryFilters, transferableMap]);
+  }, [data, appMode, filterPartner, filterGroup, filterFab, filterCriterio, filterABC, debouncedSearchTerm, selectedFiliais, staticInventoryFilters, transferableMap]);
+
+  const shouldHideSidebar = screen === 'dashboard' && appMode === 'missing_items';
 
   return (
-    <div className="min-h-screen bg-brand-bg text-brand-text-primary dark:text-gray-200">
-      <AnimatePresence mode="wait">
-        {screen === 'selection' && (
-          <motion.div 
-            key="selection"
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 1.05 }}
-            className="h-screen flex flex-col items-center justify-center p-6 text-center relative"
-          >
-            <div className="absolute top-8 right-8">
-              <button 
-                onClick={toggleTheme}
-                className="p-3 bg-brand-container border border-brand-border rounded-2xl text-brand-text-secondary hover:text-brand-blue hover:bg-brand-blue/5 transition-all shadow-xl premium-glass backdrop-blur-xl"
-                title={theme === 'light' ? "Modo Escuro" : "Modo Claro"}
-              >
-                {theme === 'light' ? <Moon className="w-5 h-5" /> : <Sun className="w-5 h-5" />}
-              </button>
-            </div>
-            <div className="w-16 h-16 bg-brand-blue rounded-2xl flex items-center justify-center mb-6 shadow-xl shadow-brand-blue/20">
-              <LayoutDashboard className="text-white w-8 h-8" />
-            </div>
-            <h1 className="text-3xl font-bold tracking-tight mb-2">Selecione o Dashboard</h1>
-            <p className="text-brand-text-secondary max-w-md mb-12">
-              Escolha qual fluxo de dados deseja analisar. O sistema adaptará os indicadores para o contexto selecionado.
-            </p>
+    <div className={`min-h-screen bg-brand-bg relative flex overflow-hidden ${theme === 'dark' ? 'dark' : ''}`}>
+      {/* Sidebar Navigation */}
+      <aside className={`bg-brand-card dark:bg-zinc-900 border-r border-brand-border flex flex-col z-50 transition-all duration-300 ${shouldHideSidebar ? 'w-0 overflow-hidden border-r-0 pointer-events-none opacity-0' : 'w-64'}`}>
+        <div className="p-6 border-b border-brand-border flex items-center gap-3">
+          <div className="w-10 h-10 bg-brand-blue rounded-xl flex items-center justify-center shadow-lg shadow-brand-blue/20">
+            <BarChart3 className="w-6 h-6 text-white" />
+          </div>
+          <div>
+            <h1 className="text-sm font-black text-brand-text-primary dark:text-white uppercase leading-none">ERP Cortex</h1>
+            <p className="text-[10px] text-brand-text-secondary opacity-50 font-mono tracking-tighter">PREDICTIVE v2.4</p>
+          </div>
+        </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-8 w-full max-w-6xl">
-              <button 
-                onClick={() => { setAppMode('purchases'); setScreen('upload'); }}
-                className="group relative p-10 bg-brand-container border-2 border-brand-border rounded-[3rem] hover:border-brand-blue/50 transition-all text-left overflow-hidden shadow-soft"
-              >
-                <div className="absolute top-0 right-0 p-6 opacity-0 group-hover:opacity-10 transition-all transform group-hover:scale-150 rotate-12">
-                  <ShoppingCart className="w-32 h-32" />
-                </div>
-                <div className="w-16 h-16 bg-brand-blue/10 rounded-2xl flex items-center justify-center mb-8 border border-brand-blue/20 shadow-lg glow-blue group-hover:scale-110 transition-transform">
-                  <TrendingDown className="text-brand-blue w-8 h-8" />
-                </div>
-                <div className="text-[10px] font-black text-brand-blue uppercase tracking-[0.4em] mb-4 font-mono">FINANCEIRO</div>
-                <h3 className="text-2xl font-black mb-3 text-brand-text-primary tracking-tight">Dashboard Compras</h3>
-                <p className="text-sm text-brand-text-secondary leading-relaxed font-black">
-                  Análise profunda de fornecedores, redução de custos e otimização do mix.
-                </p>
-                <div className="mt-10 flex items-center text-xs font-black text-brand-blue uppercase tracking-[0.3em] gap-3">
-                  INICIAR SESSÃO <ArrowRight className="w-4 h-4 group-hover:translate-x-2 transition-transform" />
-                </div>
-              </button>
+        <nav className="flex-1 overflow-y-auto p-4 space-y-1">
+          <div className="text-[9px] font-black text-brand-text-secondary opacity-40 uppercase tracking-[0.2em] mb-4 mt-2 px-2">Principais</div>
+          <SidebarItem icon={<LayoutDashboard size={18} />} label="Dashboard" active={['dashboard', 'predictive', 'transfers', 'purchases'].includes(activeModule)} onClick={() => setActiveModule('dashboard')} />
+          
 
-              <button 
-                onClick={() => { setAppMode('missing_items'); setScreen('upload'); }}
-                className="group relative p-10 bg-brand-container border-2 border-brand-border rounded-[3rem] hover:border-brand-yellow/50 transition-all text-left overflow-hidden shadow-soft"
-              >
-                <div className="absolute top-0 right-0 p-6 opacity-0 group-hover:opacity-10 transition-all transform group-hover:scale-150 rotate-12">
-                  <LayoutDashboard className="w-32 h-32" />
-                </div>
-                <div className="w-16 h-16 bg-brand-yellow/10 rounded-2xl flex items-center justify-center mb-8 border border-brand-yellow/20 shadow-lg glow-yellow group-hover:scale-110 transition-transform">
-                  <AlertCircle className="text-brand-yellow w-8 h-8" />
-                </div>
-                <div className="text-[10px] font-black text-brand-yellow uppercase tracking-[0.4em] mb-4 font-mono">LOGÍSTICA</div>
-                <h3 className="text-2xl font-black mb-3 text-brand-text-primary tracking-tight">Itens em Falta</h3>
-                <p className="text-sm text-brand-text-secondary leading-relaxed font-black">
-                  Monitoramento inteligente de ruptura, excesso e sugestão de compras.
-                </p>
-                <div className="mt-10 flex items-center text-xs font-black text-brand-yellow uppercase tracking-[0.3em] gap-3">
-                  INICIAR SESSÃO <ArrowRight className="w-4 h-4 group-hover:translate-x-2 transition-transform" />
-                </div>
-              </button>
 
-              <button 
-                onClick={() => { setAppMode('sales'); setScreen('upload'); }}
-                className="group relative p-10 bg-brand-container border-2 border-brand-border rounded-[3rem] hover:border-brand-green/50 transition-all text-left overflow-hidden shadow-soft"
-              >
-                <div className="absolute top-0 right-0 p-6 opacity-0 group-hover:opacity-10 transition-all transform group-hover:scale-150 rotate-12">
-                  <TrendingUp className="w-32 h-32" />
-                </div>
-                <div className="w-16 h-16 bg-brand-green/10 rounded-2xl flex items-center justify-center mb-8 border border-brand-green/20 shadow-lg glow-green group-hover:scale-110 transition-transform">
-                  <TrendingUp className="text-brand-green w-8 h-8" />
-                </div>
-                <div className="text-[10px] font-black text-brand-green uppercase tracking-[0.4em] mb-4 font-mono">COMERCIAL</div>
-                <h3 className="text-2xl font-black mb-3 text-brand-text-primary tracking-tight">Dashboard Vendas</h3>
-                <p className="text-sm text-brand-text-secondary leading-relaxed font-black">
-                  Gestão estratégica de faturamento, canais e performance de produtos.
-                </p>
-                <div className="mt-10 flex items-center text-xs font-black text-brand-green uppercase tracking-[0.3em] gap-3">
-                  INICIAR SESSÃO <ArrowRight className="w-4 h-4 group-hover:translate-x-2 transition-transform" />
-                </div>
-              </button>
-            </div>
-          </motion.div>
-        )}
+          {isAdmin && (
+            <>
+              <div className="text-[9px] font-black text-brand-text-secondary opacity-40 uppercase tracking-[0.2em] mb-4 mt-8 px-2">Administração</div>
+              <SidebarItem icon={<Users size={18} />} label="Usuários" active={activeModule === 'users'} onClick={() => setActiveModule('users')} />
+              <SidebarItem icon={<History size={18} />} label="Logs/Auditoria" active={activeModule === 'audit'} onClick={() => setActiveModule('audit')} />
+              <SidebarItem icon={<ShieldCheck size={18} />} label="Permissões" active={activeModule === 'permissions'} onClick={() => setActiveModule('permissions')} />
+              <SidebarItem icon={<Network size={18} />} label="Integrações" active={activeModule === 'integrations'} onClick={() => setActiveModule('integrations')} />
+              <SidebarItem icon={<Settings size={18} />} label="Configurações" active={activeModule === 'settings'} onClick={() => setActiveModule('settings')} />
+            </>
+          )}
+        </nav>
 
-        {screen === 'upload' && (
-          <motion.div 
-            key="upload"
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 1.05 }}
-            className="h-screen flex flex-col items-center justify-center p-6 text-center relative"
-          >
-            <div className="absolute top-8 right-8">
-              <button 
-                onClick={toggleTheme}
-                className="p-3 bg-brand-container border border-brand-border rounded-2xl text-brand-text-secondary hover:text-brand-blue hover:bg-brand-blue/5 transition-all shadow-xl premium-glass backdrop-blur-xl"
-                title={theme === 'light' ? "Modo Escuro" : "Modo Claro"}
-              >
-                {theme === 'light' ? <Moon className="w-5 h-5" /> : <Sun className="w-5 h-5" />}
-              </button>
-            </div>
-            <div className={`w-16 h-16 ${dashboardConfig.barColor} rounded-2xl flex items-center justify-center mb-6 shadow-xl`}>
-              <dashboardConfig.icon className="text-white w-8 h-8" />
-            </div>
-            <h1 className="text-3xl font-bold tracking-tight mb-2 text-brand-text-primary">{dashboardConfig.title}</h1>
-            <p className="text-brand-text-secondary max-w-md mb-8">
-              Transforme planilhas brutas de ERP em insights estratégicos. 
-              Suporte para reconciliação automática de filiais e {dashboardConfig.partnersLabel.toLowerCase()}.
-            </p>
-            
-            <div 
-                className="w-full max-w-lg border-2 border-dashed border-brand-border rounded-xl bg-brand-card p-12 cursor-pointer hover:border-dashboard-color/50 hover:bg-white/5 transition-all group relative"
-                onDragOver={e => e.preventDefault()}
-                onDrop={handleFileUpload}
-              >
-                <input 
-                  type="file" 
-                  className="absolute inset-0 opacity-0 cursor-pointer" 
-                  onChange={handleFileUpload}
-                  accept=".xlsx,.xls,.csv"
+        <div className="p-4 border-t border-brand-border">
+          <div className="p-3 bg-brand-blue/5 rounded-2xl flex items-center gap-3">
+             <div className="w-8 h-8 rounded-full bg-brand-blue text-white flex items-center justify-center font-bold text-xs uppercase shadow-sm">
+                {profile?.displayName?.charAt(0) || 'U'}
+             </div>
+             <div className="flex-1 overflow-hidden">
+                <p className="text-[10px] font-black text-brand-text-primary dark:text-gray-200 uppercase truncate">{profile?.displayName}</p>
+                <p className="text-[8px] text-brand-text-secondary font-mono opacity-60 truncate">{profile?.role}</p>
+             </div>
+             <button onClick={logout} className="p-1.5 text-brand-text-secondary hover:text-brand-red transition-colors">
+                <LogIn size={14} className="rotate-180" />
+             </button>
+          </div>
+        </div>
+      </aside>
+
+      {/* Main Content Area */}
+      <div className="flex-1 flex flex-col relative overflow-hidden bg-brand-bg transition-all duration-300">
+        <AnimatePresence mode="wait">
+          {activeModule === 'users' && isAdmin ? (
+            <motion.div key="users" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="flex-1 overflow-auto p-8">
+               <UsersManagement />
+            </motion.div>
+          ) : activeModule === 'audit' && isAdmin ? (
+            <motion.div key="audit" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="flex-1 overflow-auto p-8">
+               <AuditLogs />
+            </motion.div>
+          ) : isAdmin && !['dashboard', 'predictive', 'transfers', 'purchases'].includes(activeModule) ? (
+            <motion.div key="generic" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="flex-1 flex flex-col items-center justify-center p-8 text-center uppercase">
+               <Cpu className="w-16 h-16 text-brand-blue mb-4 opacity-20" />
+               <h2 className="text-2xl font-black mb-2 tracking-tight text-brand-text-primary dark:text-white">{activeModule}</h2>
+               <p className="text-brand-text-secondary max-w-md font-mono text-[10px] tracking-widest leading-loose">
+                 ESTE MÓDULO ESTÁ SENDO CONFIGURADO E ESTARÁ DISPONÍVEL EM BREVE.
+               </p>
+            </motion.div>
+          ) : ['dashboard', 'predictive', 'transfers', 'purchases'].includes(activeModule) ? (
+            <AnimatePresence mode="wait">
+              {screen === 'selection' ? (
+            <motion.div 
+              key="selection"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 1.05 }}
+              className="h-screen flex flex-col items-center justify-center p-6 text-center relative"
+            >
+              <div className="absolute top-8 right-8 flex items-center gap-3">
+                <div className="flex flex-col items-end hidden xs:flex">
+                  <span className="text-[10px] font-black text-brand-text-primary dark:text-gray-200 uppercase leading-none">{profile?.displayName}</span>
+                  <span className="text-[8px] text-brand-text-secondary opacity-50 font-mono italic uppercase tracking-tighter">{profile?.role}</span>
+                </div>
+                <button 
+                  onClick={toggleTheme}
+                  className="p-3 bg-brand-container border border-brand-border rounded-2xl text-brand-text-secondary hover:text-brand-blue hover:bg-brand-blue/5 transition-all shadow-xl premium-glass backdrop-blur-xl"
+                >
+                  {theme === 'light' ? <Moon className="w-5 h-5" /> : <Sun className="w-5 h-5" />}
+                </button>
+                <button 
+                  onClick={logout}
+                  className="p-3 bg-brand-red/10 border border-brand-red/20 rounded-2xl text-brand-red hover:bg-brand-red hover:text-white transition-all shadow-xl"
+                >
+                  <LogIn className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="w-16 h-16 bg-brand-blue rounded-2xl flex items-center justify-center mb-6 shadow-xl shadow-brand-blue/20 animate-float">
+                <LayoutDashboard className="text-white w-8 h-8" />
+              </div>
+              <h1 className="text-4xl font-black tracking-tight mb-2 uppercase italic text-brand-text-primary dark:text-white">Selecione o Dashboard</h1>
+              <p className="text-brand-text-secondary max-w-md mb-12 font-mono text-[10px] uppercase tracking-widest opacity-60">
+                O CORTEX ADAPTARÁ OS INDICADORES PARA O CONTEXTO SELECIONADO.
+              </p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-8 w-full max-w-6xl px-4">
+                <DashboardOption 
+                  onClick={() => { setAppMode('purchases'); setScreen('upload'); }}
+                  icon={<TrendingDown className="text-brand-blue w-8 h-8" />}
+                  label="FINANCEIRO"
+                  title="Dashboard Compras"
+                  description="Análise profunda de fornecedores, redução de custos e otimização do mix."
+                  accent="blue"
+                  subIcon={<ShoppingCart className="w-32 h-32" />}
                 />
-                <Upload className="mx-auto w-10 h-10 text-brand-text-secondary group-hover:text-brand-blue transition-colors mb-4" />
-                <h3 className="text-lg font-bold mb-1 text-brand-text-primary">Arraste sua planilha aqui</h3>
-                <p className="text-sm text-brand-text-secondary font-medium">Formato .xlsx, .xls ou .csv</p>
+                <DashboardOption 
+                  onClick={() => { 
+                    setAppMode('missing_items'); 
+                    fetchDriveData(true);
+                  }}
+                  icon={<AlertCircle className="text-brand-yellow w-8 h-8" />}
+                  label="LOGÍSTICA"
+                  title="Produtos em Falta"
+                  description="Monitoramento inteligente de ruptura, excesso e sugestão de compras automático (Drive)."
+                  accent="yellow"
+                  subIcon={<PackageSearch className="w-32 h-32" />}
+                />
+                <DashboardOption 
+                  onClick={() => { setAppMode('sales'); setScreen('upload'); }}
+                  icon={<TrendingUp className="text-brand-green w-8 h-8" />}
+                  label="COMERCIAL"
+                  title="Dashboard Vendas"
+                  description="Gestão estratégica de faturamento, canais e performance de produtos."
+                  accent="green"
+                  subIcon={<BarChart3 className="w-32 h-32" />}
+                />
+              </div>
+            </motion.div>
+          ) : screen === 'upload' ? (
+            <motion.div 
+              key="upload"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 1.05 }}
+              className="h-screen flex flex-col items-center justify-center p-6 text-center relative"
+            >
+              {/* Back to selection */}
+              <button 
+                onClick={resetToSelection}
+                className="absolute top-8 left-8 p-3 bg-brand-container border border-brand-border rounded-2xl text-brand-text-secondary hover:text-brand-blue hover:bg-brand-blue/5 transition-all shadow-xl"
+              >
+                <ArrowRight className="w-5 h-5 rotate-180" />
+              </button>
+
+              <div className="absolute top-8 right-8 flex items-center gap-3">
+                <button 
+                  onClick={toggleTheme}
+                  className="p-3 bg-brand-container border border-brand-border rounded-2xl text-brand-text-secondary hover:text-brand-blue hover:bg-brand-blue/5 transition-all shadow-xl premium-glass backdrop-blur-xl"
+                >
+                  {theme === 'light' ? <Moon className="w-5 h-5" /> : <Sun className="w-5 h-5" />}
+                </button>
               </div>
 
-            <button 
-              onClick={resetToSelection}
-              className="mt-8 text-xs font-bold text-brand-text-secondary hover:text-brand-text-primary uppercase tracking-widest flex items-center gap-2"
-            >
-              <RefreshCcw className="w-3 h-3" /> Alterar Tipo de Dashboard
-            </button>
-          </motion.div>
-        )}
+              <div className={`w-16 h-16 ${dashboardConfig.barColor} rounded-2xl flex items-center justify-center mb-6 shadow-xl animate-bounce-slow`}>
+                <dashboardConfig.icon className="text-white w-8 h-8" />
+              </div>
+              <h1 className="text-3xl font-black tracking-tight mb-2 text-brand-text-primary dark:text-white uppercase">{dashboardConfig.title}</h1>
+              <p className="text-brand-text-secondary max-w-md mb-8 font-mono text-[10px] uppercase tracking-widest leading-loose">
+                TRANSFORME PLANILHAS BRUTAS DE ERP EM INSIGHTS ESTRATÉGICOS. 
+                RECONCILIAÇÃO AUTOMÁTICA DE FILIAIS E {dashboardConfig.partnersLabel.toUpperCase()}.
+              </p>
+              
+              <div 
+                  className="w-full max-w-lg border-2 border-dashed border-brand-border rounded-[2.5rem] bg-brand-container/50 p-12 cursor-pointer hover:border-brand-blue/50 hover:bg-brand-blue/5 transition-all group relative premium-glass overflow-hidden"
+                  onDragOver={e => e.preventDefault()}
+                  onDrop={handleFileUpload}
+                >
+                  {/* Subtle Background Animation */}
+                  <div className="absolute inset-0 bg-gradient-to-br from-brand-blue/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+                  
+                  <input 
+                    type="file" 
+                    className="absolute inset-0 opacity-0 cursor-pointer z-10" 
+                    onChange={handleFileUpload}
+                    accept=".xlsx,.xls,.csv"
+                  />
+                  <div className="relative z-0">
+                    <div className="w-16 h-16 bg-brand-blue/10 rounded-2xl flex items-center justify-center mx-auto mb-6 group-hover:scale-110 transition-transform duration-500 border border-brand-blue/20">
+                      <Upload className="w-8 h-8 text-brand-blue" />
+                    </div>
+                    <h3 className="text-xl font-black mb-1 text-brand-text-primary dark:text-white uppercase tracking-tight">Arraste sua planilha aqui</h3>
+                    <p className="text-[10px] text-brand-text-secondary font-mono uppercase tracking-[0.2em] opacity-60">Suporte para .xlsx, .xls ou .csv</p>
+                  </div>
+                </div>
 
-        {screen === 'processing' && (
+              <button 
+                onClick={resetToSelection}
+                className="mt-8 px-6 py-2 rounded-xl bg-brand-container border border-brand-border text-[9px] font-black text-brand-text-secondary hover:text-brand-blue hover:border-brand-blue/30 transition-all uppercase tracking-[0.3em] flex items-center gap-3"
+              >
+                <RefreshCcw className="w-3.5 h-3.5" /> ALTERAR MÓDULO DASHBOARD
+              </button>
+            </motion.div>
+          ) : screen === 'processing' ? (
           <motion.div 
             key="processing"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             className="h-screen flex flex-col items-center justify-center p-6 relative"
           >
-            <div className="absolute top-8 right-8">
+            <div className="absolute top-8 right-8 flex items-center gap-3">
+              <div className="flex flex-col items-end hidden xs:flex">
+                <span className="text-[10px] font-black text-brand-text-primary dark:text-gray-200 uppercase leading-none">{user?.displayName}</span>
+                <span className="text-[8px] text-brand-text-secondary opacity-50 font-mono">{user?.email}</span>
+              </div>
               <button 
                 onClick={toggleTheme}
                 className="p-3 bg-brand-container border border-brand-border rounded-2xl text-brand-text-secondary hover:text-brand-blue hover:bg-brand-blue/5 transition-all shadow-xl premium-glass backdrop-blur-xl"
                 title={theme === 'light' ? "Modo Escuro" : "Modo Claro"}
               >
                 {theme === 'light' ? <Moon className="w-5 h-5" /> : <Sun className="w-5 h-5" />}
+              </button>
+              <button 
+                onClick={logout}
+                className="p-3 bg-brand-red/10 border border-brand-red/20 rounded-2xl text-brand-red hover:bg-brand-red hover:text-white transition-all shadow-xl"
+                title="Sair"
+              >
+                <LogIn className="w-5 h-5" />
               </button>
             </div>
             <div className="w-12 h-12 border-4 border-brand-card border-t-brand-blue rounded-full animate-spin mb-8" />
@@ -3962,9 +5229,7 @@ export default function App() {
               ))}
             </div>
           </motion.div>
-        )}
-
-        {screen === 'error' && (
+        ) : screen === 'error' ? (
           <motion.div 
             key="error"
             initial={{ opacity: 0, scale: 0.9 }}
@@ -3982,17 +5247,21 @@ export default function App() {
               Tentar Novamente
             </button>
           </motion.div>
-        )}
-
-        {screen === 'dashboard' && data && filteredData && (
+        ) : screen === 'dashboard' && data && filteredData ? (
           <motion.div 
             key="dashboard"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             className="flex flex-col min-h-screen"
           >
+            {loadingDrive && (
+              <div className="fixed bottom-8 right-8 z-[200] bg-brand-blue text-white px-4 py-2 rounded-full text-[10px] font-black uppercase tracking-widest shadow-2xl flex items-center gap-2 animate-pulse border border-white/20">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                Atualizando Dados (Drive)
+              </div>
+            )}
             <header className="sticky top-0 z-50 bg-brand-bg/80 backdrop-blur-xl border-b border-brand-border/50">
-              <div className="max-w-[1600px] mx-auto px-6 py-4 flex flex-col md:flex-row items-center justify-between gap-6">
+              <div className={`mx-auto px-6 py-4 flex flex-col md:flex-row items-center justify-between gap-6 ${shouldHideSidebar ? 'max-w-full' : 'max-w-[1600px]'}`}>
                 <div className="flex items-center gap-6">
                   <div className="flex items-center gap-4 group cursor-pointer" onClick={() => setScreen('selection')}>
                     <div className="flex items-center gap-3">
@@ -4119,21 +5388,63 @@ export default function App() {
 
                   <div className="h-8 w-px bg-brand-border mx-1 hidden lg:block" />
 
+                  <div className="flex items-center gap-3">
+                    <div className="flex flex-col items-end hidden xs:flex">
+                      <span className="text-[9px] font-black text-brand-text-primary dark:text-white uppercase leading-none">{user?.displayName || 'Usuário'}</span>
+                      <span className="text-[8px] text-brand-text-secondary opacity-50 font-mono">{user?.email}</span>
+                    </div>
+                    <button 
+                      onClick={logout}
+                      className="p-2.5 bg-brand-red/10 border border-brand-red/20 rounded-xl text-brand-red hover:bg-brand-red hover:text-white transition-all shadow-sm"
+                      title="Sair"
+                    >
+                      <LogIn className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <div className="h-8 w-px bg-brand-border mx-1 hidden lg:block" />
+
+                  {/* Controle de Layout: Grid vs Table view */}
+                  {appMode === 'missing_items' && (
+                    <div className="flex bg-gray-100 dark:bg-zinc-800/80 border border-brand-border rounded-xl p-0.5 gap-0.5 shadow-sm" title="Controle de Layout">
+                      <button
+                        onClick={() => setViewType('table')}
+                        className={`p-2 rounded-lg transition-all flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest ${viewType === 'table' ? 'bg-brand-blue text-white shadow-md' : 'text-brand-text-secondary dark:text-zinc-400 opacity-60 hover:opacity-100'}`}
+                        title="Visualização em Lista/Tabela"
+                      >
+                        <TableProperties className="w-3.5 h-3.5" />
+                        Tabela
+                      </button>
+                      <button
+                        onClick={() => setViewType('grid')}
+                        className={`p-2 rounded-lg transition-all flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest ${viewType === 'grid' ? 'bg-brand-blue text-white shadow-md' : 'text-brand-text-secondary dark:text-zinc-400 opacity-60 hover:opacity-100'}`}
+                        title="Visualização em Grade/Card"
+                      >
+                        <LayoutGrid className="w-3.5 h-3.5" />
+                        Grade
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="h-8 w-px bg-brand-border mx-1 hidden lg:block" />
+
                   <button 
                     onClick={resetToSelection}
-                    className="ml-2 px-4 py-2 bg-brand-blue/10 border border-brand-blue/20 rounded-xl text-[10px] font-black text-brand-blue hover:bg-brand-blue/20 transition-all uppercase tracking-wider flex items-center gap-2"
+                    className="ml-2 px-4 py-2.5 bg-brand-blue/10 border border-brand-blue/20 hover:border-brand-blue/30 rounded-xl text-[10px] font-black text-brand-blue dark:text-blue-400 hover:bg-brand-blue/20 transition-all uppercase tracking-wider flex items-center gap-2"
+                    title="Voltar ao menu inicial"
                   >
-                    <RefreshCcw className="w-3.5 h-3.5" />
-                    Layout
+                    <RefreshCcw className="w-3.5 h-3.5 animate-pulse" />
+                    Início
                   </button>
                 </div>
               </div>
             </header>
 
-            <main className="p-6 max-w-[1600px] mx-auto w-full flex-1 space-y-6">
+            <main className={`p-6 mx-auto w-full flex-1 space-y-6 ${shouldHideSidebar ? 'max-w-full' : 'max-w-[1600px]'}`}>
               {appMode === 'missing_items' ? (
                 <InventoryDashboardView 
                   data={data} 
+                  setData={setData}
                   filteredData={filteredData.inventory!} 
                   selectedFiliais={selectedFiliais}
                   onToggleFilial={(f) => setSelectedFiliais(prev => prev.includes(f) ? prev.filter(x => x !== f) : [...prev, f])}
@@ -4158,6 +5469,10 @@ export default function App() {
                     setSearch: setSearchTerm,
                     setAbc: setFilterABC
                   }}
+                  activeModule={activeModule}
+                  setActiveModule={setActiveModule}
+                  viewType={viewType}
+                  setViewType={setViewType}
                 />
               ) : (
                 <FinanceDashboardView 
@@ -4177,7 +5492,7 @@ export default function App() {
             </main>
 
             <footer className="bg-brand-card border-t border-brand-border p-4 text-[10px] text-gray-600 font-mono">
-              <div className="max-w-[1600px] mx-auto flex items-center gap-4">
+              <div className={`mx-auto flex items-center gap-4 ${shouldHideSidebar ? 'max-w-full' : 'max-w-[1600px]'}`}>
                 <div className="flex items-center gap-2">
                   <div className="w-1.5 h-1.5 bg-brand-green rounded-full shadow-[0_0_4px_#38e2a0]" />
                   <span>SISTEMA ATIVO</span>
@@ -4215,10 +5530,25 @@ export default function App() {
                   theme={theme}
                 />
               )}
-            </AnimatePresence>
+                </AnimatePresence>
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
+        ) : (
+          <motion.div key="unauthorized" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex-1 flex flex-col items-center justify-center p-8 text-center">
+             <AlertTriangle className="w-16 h-16 text-brand-red mb-4" />
+             <h2 className="text-2xl font-black mb-2 uppercase tracking-tight text-brand-text-primary dark:text-white">Acesso Restrito</h2>
+             <p className="text-brand-text-secondary max-w-md font-mono text-[10px] uppercase tracking-widest leading-loose">
+               ESTE MÓDULO É LIMITADO A ADMINISTRADORES MASTER. 
+               SE VOCÊ ACREDITA QUE ISSO É UM ERRO, CONTATE O SUPORTE.
+             </p>
+             <button onClick={() => setActiveModule('dashboard')} className="mt-8 px-6 py-2 bg-brand-blue text-white rounded-xl font-black text-[10px] uppercase tracking-widest">
+                VOLTAR AO DASHBOARD
+             </button>
           </motion.div>
         )}
       </AnimatePresence>
+      </div>
     </div>
   );
 }
@@ -4720,5 +6050,90 @@ function GroupDetailsModal({ groupName, filialName, mode, records, onClose, them
         </div>
       </motion.div>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
+  );
+}
+
+function AppContent() {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="h-screen w-full flex items-center justify-center bg-brand-bg">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 border-4 border-brand-card border-t-brand-blue rounded-full animate-spin" />
+          <p className="text-brand-text-secondary font-mono text-[10px] uppercase tracking-widest animate-pulse">Carregando autenticação...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <LoginPage />;
+  }
+
+  return <Dashboard />;
+}
+
+function DashboardOption({ onClick, icon, label, title, description, accent, subIcon }: { onClick: () => void, icon: React.ReactNode, label: string, title: string, description: string, accent: 'blue' | 'yellow' | 'green', subIcon: React.ReactNode }) {
+  const colors = {
+    blue: 'border-brand-blue/20 hover:border-brand-blue/50 ring-brand-blue/10 bg-brand-blue/5 text-brand-blue glow-blue',
+    yellow: 'border-brand-yellow/20 hover:border-brand-yellow/50 ring-brand-yellow/10 bg-brand-yellow/5 text-brand-yellow glow-yellow',
+    green: 'border-brand-green/20 hover:border-brand-green/50 ring-brand-green/10 bg-brand-green/5 text-brand-green glow-green'
+  };
+
+  return (
+    <button 
+      onClick={onClick}
+      className={`group relative p-10 bg-brand-container border-2 rounded-[3.5rem] transition-all text-left overflow-hidden shadow-2xl premium-glass ${colors[accent]}`}
+    >
+      <div className="absolute top-0 right-0 p-8 opacity-0 group-hover:opacity-10 transition-all transform group-hover:scale-150 rotate-12 duration-700 pointer-events-none">
+        {subIcon}
+      </div>
+      <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-8 border transition-all duration-500 group-hover:scale-110 shadow-lg ${accent === 'blue' ? 'bg-brand-blue/10 border-brand-blue/20' : accent === 'yellow' ? 'bg-brand-yellow/10 border-brand-yellow/20' : 'bg-brand-green/10 border-brand-green/20'}`}>
+        {icon}
+      </div>
+      <div className={`text-[10px] font-black uppercase tracking-[0.4em] mb-4 font-mono opacity-60`}>{label}</div>
+      <h3 className="text-2xl font-black mb-3 text-black dark:text-white tracking-tight leading-tight group-hover:translate-x-1 transition-transform">
+        {title}
+      </h3>
+      <p className="text-[11px] text-brand-text-secondary leading-relaxed font-bold opacity-80 group-hover:opacity-100 transition-opacity">
+        {description}
+      </p>
+      <div className="mt-10 flex items-center text-[10px] font-black uppercase tracking-[0.3em] gap-3 group-hover:gap-5 transition-all">
+        INICIAR SESSÃO <ArrowRight className="w-4 h-4" />
+      </div>
+    </button>
+  );
+}
+
+function SidebarItem({ icon, label, active, onClick }: { icon: React.ReactNode, label: string, active?: boolean, onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200 group ${
+        active 
+          ? 'bg-brand-blue text-white shadow-lg shadow-brand-blue/20' 
+          : 'text-brand-text-secondary hover:bg-brand-blue/5 hover:text-brand-blue'
+      }`}
+    >
+      <div className={`transition-transform duration-200 ${active ? 'scale-110' : 'group-hover:scale-110'}`}>
+        {icon}
+      </div>
+      <span className="text-[11px] font-black uppercase tracking-widest">{label}</span>
+      {active && (
+        <motion.div 
+          layoutId="sidebar-active"
+          className="ml-auto w-1 h-4 bg-white/40 rounded-full"
+        />
+      )}
+    </button>
   );
 }
