@@ -443,6 +443,21 @@ async function processTransactionData(file: File, sheetData: any[][], mode: AppM
     const itemFilial = colIdx.filial >= 0 ? String(rawRow[colIdx.filial] || '').trim().toUpperCase() : curFilial;
     const itemParceiro = colIdx.parceiro >= 0 ? String(rawRow[colIdx.parceiro] || '').trim().toUpperCase() : curParceiro;
 
+    const codItemVal = String(rawRow[colIdx.code] ?? '').trim();
+    const itemDescVal = String(rawRow[colIdx.desc] ?? '').trim();
+
+    // Rule: item starting with or containing ACE, MED, ALI belongs to Jhonatas Cadorin
+    const codUpper = codItemVal.toUpperCase();
+    const descUpper = itemDescVal.toUpperCase();
+    const isJhonatas = ['ACE', 'MED', 'ALI'].some(prefix => 
+      codUpper.startsWith(prefix) || 
+      codUpper.includes('-' + prefix) || 
+      codUpper.includes(' ' + prefix) || 
+      descUpper.startsWith(prefix) || 
+      descUpper.includes(' ' + prefix)
+    );
+    const comprador = isJhonatas ? 'Jhonatas Cadorin' : 'Outros';
+
     records.push({
       mes, ano,
       filial: itemFilial || curFilial,
@@ -450,11 +465,12 @@ async function processTransactionData(file: File, sheetData: any[][], mode: AppM
       grupo: colIdx.grupo >= 0 ? (String(rawRow[colIdx.grupo] || '').trim().toUpperCase() || curGrupo) : curGrupo,
       fab: colIdx.fab >= 0 ? String(rawRow[colIdx.fab] || '').trim().toUpperCase() : 'N/I',
       nf: nfVal,
-      codItem: String(rawRow[colIdx.code] ?? '').trim(),
-      itemDesc: String(rawRow[colIdx.desc] ?? '').trim(),
+      codItem: codItemVal,
+      itemDesc: itemDescVal,
       un: String(rawRow[colIdx.un] ?? '').trim(),
       qtde: Math.round(parseBrazilianNumber(rawRow[colIdx.qty])),
-      total: Math.round(total * 100) / 100
+      total: Math.round(total * 100) / 100,
+      comprador
     });
   }
 
@@ -480,6 +496,7 @@ async function processTransactionData(file: File, sheetData: any[][], mode: AppM
   records.forEach(r => { partnerAgg[r.parceiro] = (partnerAgg[r.parceiro] || 0) + r.total; });
   const topPartners = Object.entries(partnerAgg).sort((a, b) => b[1] - a[1]).slice(0, 15).map(([name, value]) => ({ name: name.trim(), value: Math.round(value * 100) / 100 }));
   const latestMonth = Math.max(...records.map(r => r.mes));
+  const compradores = [...new Set(records.map(r => r.comprador || 'Outros'))].sort();
 
   return {
     records,
@@ -488,6 +505,7 @@ async function processTransactionData(file: File, sheetData: any[][], mode: AppM
     filiais,
     partners,
     groups,
+    compradores,
     globalMonthly,
     filialTotals,
     topPartners

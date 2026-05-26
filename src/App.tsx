@@ -82,7 +82,6 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 
 import { AuthProvider, useAuth } from './lib/AuthContext';
-import LoginPage from './components/LoginPage';
 import UsersManagement from './components/UsersManagement';
 import AuditLogs from './components/AuditLogs';
 
@@ -3384,6 +3383,14 @@ function InventoryDashboardView({
       </div>
 
           <AnimatePresence>
+        {selectedItem && (
+          <ItemDetailModal
+            item={selectedItem}
+            data={data}
+            onClose={() => setSelectedItem(null)}
+            theme={theme}
+          />
+        )}
         {separationModal?.isOpen && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-300">
             <motion.div 
@@ -4018,13 +4025,16 @@ function Dashboard() {
     }
   }, [theme]);
 
-  const [screen, setScreen] = useState<Screen>(() => {
-    const saved = localStorage.getItem('cortex-screen');
-    return (saved === 'selection' || saved === 'dashboard' || saved === 'processing' || saved === 'error') ? (saved as Screen) : 'dashboard';
-  });
   const [appMode, setAppMode] = useState<AppMode>(() => {
     const saved = localStorage.getItem('cortex-appMode') as AppMode;
     return (saved === 'missing_items' || saved === 'purchases' || saved === 'sales') ? saved : 'missing_items';
+  });
+  const [screen, setScreen] = useState<Screen>(() => {
+    const saved = localStorage.getItem('cortex-screen');
+    if (!saved) return 'selection';
+    const cached = localStorage.getItem('cortex_drive_cache_v1');
+    if (saved === 'dashboard' && !cached && appMode === 'missing_items') return 'selection';
+    return (saved === 'selection' || saved === 'upload' || saved === 'processing' || saved === 'error' || saved === 'dashboard') ? (saved as Screen) : 'selection';
   });
   const [loadingDrive, setLoadingDrive] = useState(false);
 
@@ -4038,7 +4048,12 @@ function Dashboard() {
   useEffect(() => {
     if (profile?.role === 'Admin Master' && !adminRedirected.current) {
       adminRedirected.current = true;
-      setScreen('dashboard');
+      const cached = localStorage.getItem('cortex_drive_cache_v1');
+      if (cached) {
+        setScreen('dashboard');
+      } else {
+        setScreen('selection');
+      }
       setActiveModule('dashboard');
     }
   }, [profile]);
@@ -4102,20 +4117,7 @@ function Dashboard() {
     return null;
   });
 
-  useEffect(() => {
-    if (appMode === 'missing_items') {
-      // ONLY trigger initial remote fetch if data is not already loaded in memory to prevent slow tab switches
-      if (!data) {
-        fetchDriveData(true);
-      }
 
-      const interval = setInterval(() => {
-        fetchDriveData(false);
-      }, 86400000); // 24 hours
-
-      return () => clearInterval(interval);
-    }
-  }, [appMode, fetchDriveData, data]);
   const [error, setError] = useState<string | null>(null);
   const [processingStep, setProcessingStep] = useState(0);
   
@@ -4126,6 +4128,9 @@ function Dashboard() {
   const [filterPartner, setFilterPartner] = useState<string>('');
   const [filterGroup, setFilterGroup] = useState<string>('');
   const [filterFab, setFilterFab] = useState<string>('');
+  const [filterComprador, setFilterComprador] = useState<string>(() => {
+    return localStorage.getItem('cortex-filterComprador') || '';
+  });
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
 
@@ -4136,6 +4141,10 @@ function Dashboard() {
   useEffect(() => {
     localStorage.setItem('cortex-filterFab', filterFab);
   }, [filterFab]);
+
+  useEffect(() => {
+    localStorage.setItem('cortex-filterComprador', filterComprador);
+  }, [filterComprador]);
 
   useEffect(() => {
     localStorage.setItem('cortex-searchTerm', searchTerm);
@@ -4157,6 +4166,7 @@ function Dashboard() {
     if (filterPartner !== '') setFilterPartner('');
     if (filterGroup !== '') setFilterGroup('');
     if (filterFab !== '') setFilterFab('');
+    if (filterComprador !== '') setFilterComprador('');
     if (searchTerm !== '') setSearchTerm('');
     if (debouncedSearchTerm !== '') setDebouncedSearchTerm('');
     if (filterCriterio !== '') setFilterCriterio('');
@@ -4165,6 +4175,7 @@ function Dashboard() {
     
     localStorage.removeItem('cortex-filterGroup');
     localStorage.removeItem('cortex-filterFab');
+    localStorage.removeItem('cortex-filterComprador');
     localStorage.removeItem('cortex-searchTerm');
     localStorage.removeItem('cortex-filterCriterio');
     localStorage.removeItem('cortex-filterABC');
@@ -4204,6 +4215,7 @@ function Dashboard() {
     setFilterPartner('');
     setFilterGroup('');
     setFilterFab('');
+    setFilterComprador('');
     setSearchTerm('');
     setFilterCriterio('');
     setFilterABC('');
@@ -4213,9 +4225,6 @@ function Dashboard() {
 
   const steps = [
     'Lendo arquivo com SheetJS',
-    'Detectando estrutura de ERP',
-    'Filtrando transações NFE',
-    'Agregando dados financeiros',
     'Finalizando visualizações'
   ];
 
@@ -4932,7 +4941,8 @@ function Dashboard() {
       const match = isBranchMatch && 
                     (!filterPartner || r.parceiro === filterPartner) && 
                     (!filterGroup || r.grupo === filterGroup) &&
-                    (!filterFab || r.fab === filterFab);
+                    (!filterFab || r.fab === filterFab) &&
+                    (!filterComprador || r.comprador === filterComprador);
       if (match) {
         res.total += r.total;
         res.nfs.add(`${r.nf}|${r.parceiro}`);
@@ -4952,6 +4962,7 @@ function Dashboard() {
     const availablePartners = [...new Set((data.records || []).map(r => r.parceiro))].sort();
     const availableGroups = [...new Set((data.records || []).map(r => r.grupo || 'OUTROS'))].sort();
     const availableFabs = [...new Set((data.records || []).filter(r => r.fab && r.fab !== 'N/I').map(r => r.fab!))].sort();
+    const availableCompradores = [...new Set((data.records || []).map(r => r.comprador || 'Outros'))].sort();
 
     const latestMonth = data.latestMonth || 1;
     let deltas: any = {};
@@ -4974,60 +4985,15 @@ function Dashboard() {
       filialAgg: res.filialAgg,
       availablePartners,
       availableGroups,
-      availableFabs
+      availableFabs,
+      availableCompradores
     };
-  }, [data, appMode, filterPartner, filterGroup, filterFab, filterCriterio, filterABC, debouncedSearchTerm, selectedFiliais, staticInventoryFilters, transferableMap]);
+  }, [data, appMode, filterPartner, filterGroup, filterFab, filterComprador, filterCriterio, filterABC, debouncedSearchTerm, selectedFiliais, staticInventoryFilters, transferableMap]);
 
-  const shouldHideSidebar = screen === 'dashboard' && appMode === 'missing_items';
+  const shouldHideSidebar = true;
 
   return (
     <div className={`min-h-screen bg-brand-bg relative flex overflow-hidden ${theme === 'dark' ? 'dark' : ''}`}>
-      {/* Sidebar Navigation */}
-      <aside className={`bg-brand-card dark:bg-zinc-900 border-r border-brand-border flex flex-col z-50 transition-all duration-300 ${shouldHideSidebar ? 'w-0 overflow-hidden border-r-0 pointer-events-none opacity-0' : 'w-64'}`}>
-        <div className="p-6 border-b border-brand-border flex items-center gap-3">
-          <div className="w-10 h-10 bg-brand-blue rounded-xl flex items-center justify-center shadow-lg shadow-brand-blue/20">
-            <BarChart3 className="w-6 h-6 text-white" />
-          </div>
-          <div>
-            <h1 className="text-sm font-black text-brand-text-primary dark:text-white uppercase leading-none">ERP Cortex</h1>
-            <p className="text-[10px] text-brand-text-secondary opacity-50 font-mono tracking-tighter">PREDICTIVE v2.4</p>
-          </div>
-        </div>
-
-        <nav className="flex-1 overflow-y-auto p-4 space-y-1">
-          <div className="text-[9px] font-black text-brand-text-secondary opacity-40 uppercase tracking-[0.2em] mb-4 mt-2 px-2">Principais</div>
-          <SidebarItem icon={<LayoutDashboard size={18} />} label="Dashboard" active={['dashboard', 'predictive', 'transfers', 'purchases'].includes(activeModule)} onClick={() => setActiveModule('dashboard')} />
-          
-
-
-          {isAdmin && (
-            <>
-              <div className="text-[9px] font-black text-brand-text-secondary opacity-40 uppercase tracking-[0.2em] mb-4 mt-8 px-2">Administração</div>
-              <SidebarItem icon={<Users size={18} />} label="Usuários" active={activeModule === 'users'} onClick={() => setActiveModule('users')} />
-              <SidebarItem icon={<History size={18} />} label="Logs/Auditoria" active={activeModule === 'audit'} onClick={() => setActiveModule('audit')} />
-              <SidebarItem icon={<ShieldCheck size={18} />} label="Permissões" active={activeModule === 'permissions'} onClick={() => setActiveModule('permissions')} />
-              <SidebarItem icon={<Network size={18} />} label="Integrações" active={activeModule === 'integrations'} onClick={() => setActiveModule('integrations')} />
-              <SidebarItem icon={<Settings size={18} />} label="Configurações" active={activeModule === 'settings'} onClick={() => setActiveModule('settings')} />
-            </>
-          )}
-        </nav>
-
-        <div className="p-4 border-t border-brand-border">
-          <div className="p-3 bg-brand-blue/5 rounded-2xl flex items-center gap-3">
-             <div className="w-8 h-8 rounded-full bg-brand-blue text-white flex items-center justify-center font-bold text-xs uppercase shadow-sm">
-                {profile?.displayName?.charAt(0) || 'U'}
-             </div>
-             <div className="flex-1 overflow-hidden">
-                <p className="text-[10px] font-black text-brand-text-primary dark:text-gray-200 uppercase truncate">{profile?.displayName}</p>
-                <p className="text-[8px] text-brand-text-secondary font-mono opacity-60 truncate">{profile?.role}</p>
-             </div>
-             <button onClick={logout} className="p-1.5 text-brand-text-secondary hover:text-brand-red transition-colors">
-                <LogIn size={14} className="rotate-180" />
-             </button>
-          </div>
-        </div>
-      </aside>
-
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col relative overflow-hidden bg-brand-bg transition-all duration-300">
         <AnimatePresence mode="wait">
@@ -5068,12 +5034,6 @@ function Dashboard() {
                 >
                   {theme === 'light' ? <Moon className="w-5 h-5" /> : <Sun className="w-5 h-5" />}
                 </button>
-                <button 
-                  onClick={logout}
-                  className="p-3 bg-brand-red/10 border border-brand-red/20 rounded-2xl text-brand-red hover:bg-brand-red hover:text-white transition-all shadow-xl"
-                >
-                  <LogIn className="w-5 h-5" />
-                </button>
               </div>
               <div className="w-16 h-16 bg-brand-blue rounded-2xl flex items-center justify-center mb-6 shadow-xl shadow-brand-blue/20 animate-float">
                 <LayoutDashboard className="text-white w-8 h-8" />
@@ -5096,12 +5056,12 @@ function Dashboard() {
                 <DashboardOption 
                   onClick={() => { 
                     setAppMode('missing_items'); 
-                    fetchDriveData(true);
+                    setScreen('upload');
                   }}
                   icon={<AlertCircle className="text-brand-yellow w-8 h-8" />}
                   label="LOGÍSTICA"
                   title="Produtos em Falta"
-                  description="Monitoramento inteligente de ruptura, excesso e sugestão de compras automático (Drive)."
+                  description="Monitoramento inteligente de ruptura, excesso e sugestão de compras automático."
                   accent="yellow"
                   subIcon={<PackageSearch className="w-32 h-32" />}
                 />
@@ -5198,13 +5158,6 @@ function Dashboard() {
                 title={theme === 'light' ? "Modo Escuro" : "Modo Claro"}
               >
                 {theme === 'light' ? <Moon className="w-5 h-5" /> : <Sun className="w-5 h-5" />}
-              </button>
-              <button 
-                onClick={logout}
-                className="p-3 bg-brand-red/10 border border-brand-red/20 rounded-2xl text-brand-red hover:bg-brand-red hover:text-white transition-all shadow-xl"
-                title="Sair"
-              >
-                <LogIn className="w-5 h-5" />
               </button>
             </div>
             <div className="w-12 h-12 border-4 border-brand-card border-t-brand-blue rounded-full animate-spin mb-8" />
@@ -5313,6 +5266,22 @@ function Dashboard() {
                       <Layers className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-brand-text-secondary opacity-60 group-focus-within:text-brand-blue transition-colors" />
                     </div>
 
+                    {appMode === 'purchases' && (
+                    <div className="relative group">
+                      <select 
+                        className="bg-brand-card dark:bg-zinc-800 border-2 border-brand-border rounded-xl pl-8 pr-4 py-2.5 text-[10px] font-black uppercase tracking-wider outline-none transition-all appearance-none cursor-pointer focus:ring-4 focus:ring-brand-blue/10 w-[180px] text-brand-text-primary dark:text-white shadow-soft hover:border-brand-blue/40"
+                        value={filterComprador}
+                        onChange={e => setFilterComprador(e.target.value)}
+                      >
+                        <option value="" className="text-brand-text-primary dark:text-white">Comprador: Todos</option>
+                        {(filteredData.availableCompradores || []).map((c: string) => (
+                          <option key={c} value={c} className="text-brand-text-primary dark:text-white">{c}</option>
+                        ))}
+                      </select>
+                      <Users className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-brand-text-secondary opacity-60 group-focus-within:text-brand-blue transition-colors" />
+                    </div>
+                    )}
+
                     {appMode === 'missing_items' && (
                     <div className="relative group">
                       <select 
@@ -5393,13 +5362,6 @@ function Dashboard() {
                       <span className="text-[9px] font-black text-brand-text-primary dark:text-white uppercase leading-none">{user?.displayName || 'Usuário'}</span>
                       <span className="text-[8px] text-brand-text-secondary opacity-50 font-mono">{user?.email}</span>
                     </div>
-                    <button 
-                      onClick={logout}
-                      className="p-2.5 bg-brand-red/10 border border-brand-red/20 rounded-xl text-brand-red hover:bg-brand-red hover:text-white transition-all shadow-sm"
-                      title="Sair"
-                    >
-                      <LogIn className="w-4 h-4" />
-                    </button>
                   </div>
 
                   <div className="h-8 w-px bg-brand-border mx-1 hidden lg:block" />
@@ -6062,23 +6024,6 @@ export default function App() {
 }
 
 function AppContent() {
-  const { user, loading } = useAuth();
-
-  if (loading) {
-    return (
-      <div className="h-screen w-full flex items-center justify-center bg-brand-bg">
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-12 h-12 border-4 border-brand-card border-t-brand-blue rounded-full animate-spin" />
-          <p className="text-brand-text-secondary font-mono text-[10px] uppercase tracking-widest animate-pulse">Carregando autenticação...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!user) {
-    return <LoginPage />;
-  }
-
   return <Dashboard />;
 }
 

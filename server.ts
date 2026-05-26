@@ -144,10 +144,27 @@ async function startServer() {
       });
       console.log(`==================================================\n`);
 
-      const smtpHost = process.env.SMTP_HOST;
-      const smtpPort = parseInt(process.env.SMTP_PORT || '465');
-      const smtpUser = process.env.SMTP_USER;
-      const smtpPass = process.env.SMTP_PASS;
+      let smtpHost = process.env.SMTP_HOST;
+      let smtpPort = parseInt(process.env.SMTP_PORT || '465');
+      let smtpUser = process.env.SMTP_USER;
+      let smtpPass = process.env.SMTP_PASS;
+
+      // Auto-detect and swap if user put SMTP_HOST and SMTP_PASS in the wrong fields
+      if (smtpHost && smtpPass) {
+        const hostIsPass = smtpHost.includes('*') || (!smtpHost.includes('.') && smtpHost.length > 8);
+        const passIsHost = smtpPass.includes('.') && (smtpPass.startsWith('smtp.') || smtpPass.includes('mail.') || smtpPass.toLowerCase().endsWith('.com'));
+        
+        if (hostIsPass && passIsHost) {
+          console.log(`[EMAIL SEND SERVICE] Auto-detect: Detectado possível troca entre SMTP_HOST e SMTP_PASS. Swap efetuado automaticamente.`);
+          const temp = smtpHost;
+          smtpHost = smtpPass;
+          smtpPass = temp;
+        }
+      }
+
+      // Check if host is valid
+      const isHostValid = smtpHost && !smtpHost.includes('*') && !smtpHost.includes(' ') && (smtpHost.includes('.') || smtpHost.toLowerCase() === 'localhost');
+
       const smtpSecure = process.env.SMTP_SECURE === 'true' || smtpPort === 465;
       const smtpFrom = process.env.SMTP_FROM || (smtpUser ? `Cortex Inteligência <${smtpUser}>` : 'Cortex Inteligência <noreply@cortex.com>');
 
@@ -208,33 +225,38 @@ async function startServer() {
       let errorMsg = '';
 
       if (smtpHost && smtpUser && smtpPass) {
-        try {
-          const transporter = nodemailer.createTransport({
-            host: smtpHost,
-            port: smtpPort,
-            secure: smtpSecure,
-            auth: {
-              user: smtpUser,
-              pass: smtpPass
-            },
-            tls: {
-              rejectUnauthorized: false
-            }
-          });
+        if (!isHostValid) {
+          console.warn(`[EMAIL SEND SERVICE] Envio real cancelado: SMTP_HOST "${smtpHost}" não parece ser um servidor de e-mail válido.`);
+          errorMsg = `Servidor de e-mail (SMTP_HOST) configurado incorretamente: "${smtpHost}".`;
+        } else {
+          try {
+            const transporter = nodemailer.createTransport({
+              host: smtpHost,
+              port: smtpPort,
+              secure: smtpSecure,
+              auth: {
+                user: smtpUser,
+                pass: smtpPass
+              },
+              tls: {
+                rejectUnauthorized: false
+              }
+            });
 
-          await transporter.sendMail({
-            from: smtpFrom,
-            to: email,
-            subject: `📦 Solicitação de Separação - Destino: ${destination}`,
-            text: `Olá, segue a lista de itens separados para transferência para a filial: ${destination}.\n\n` + 
-                  items.map((it: any, idx: number) => `[COD: ${it.cod}] ${it.desc} - Qtd: ${it.qty} (Origem: ${it.source})`).join('\n'),
-            html: emailHtml
-          });
-          sentReal = true;
-          console.log(`[EMAIL SEND SERVICE] E-mail real enviado com sucesso para ${email}`);
-        } catch (mailErr: any) {
-          console.error('[EMAIL SEND SERVICE] Erro ao enviar com SMTP real:', mailErr);
-          errorMsg = mailErr.message || String(mailErr);
+            await transporter.sendMail({
+              from: smtpFrom,
+              to: email,
+              subject: `📦 Solicitação de Separação - Destino: ${destination}`,
+              text: `Olá, segue a lista de itens separados para transferência para a filial: ${destination}.\n\n` + 
+                    items.map((it: any, idx: number) => `[COD: ${it.cod}] ${it.desc} - Qtd: ${it.qty} (Origem: ${it.source})`).join('\n'),
+              html: emailHtml
+            });
+            sentReal = true;
+            console.log(`[EMAIL SEND SERVICE] E-mail real enviado com sucesso para ${email}`);
+          } catch (mailErr: any) {
+            console.error('[EMAIL SEND SERVICE] Erro ao enviar com SMTP real:', mailErr);
+            errorMsg = mailErr.message || String(mailErr);
+          }
         }
       }
 

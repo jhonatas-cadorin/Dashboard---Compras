@@ -29,7 +29,13 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<any>(() => {
-    // Synchronously check custom user session for instant render
+    // Default to guest Admin Master to bypass any login screens/domain errors instantly
+    const guestUser = {
+      uid: 'guest-admin',
+      email: 'jhonatas.cadorin@gmail.com',
+      displayName: 'Jhonatas Cadorin',
+      isCustom: true
+    };
     const savedCustomUser = localStorage.getItem('cortex-custom-user');
     if (savedCustomUser) {
       try {
@@ -38,7 +44,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         localStorage.removeItem('cortex-custom-user');
       }
     }
-    // Synchronously check google user session for instant render
     const savedGoogleUser = localStorage.getItem('cortex-google-user');
     if (savedGoogleUser) {
       try {
@@ -47,11 +52,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         localStorage.removeItem('cortex-google-user');
       }
     }
-    return null;
+    return guestUser;
   });
 
   const [profile, setProfile] = useState<UserProfile | null>(() => {
-    // Synchronously check user profile for instant render
+    const guestProfile: UserProfile = {
+      uid: 'guest-admin',
+      email: 'jhonatas.cadorin@gmail.com',
+      displayName: 'Jhonatas Cadorin',
+      role: 'Admin Master',
+      status: 'Active',
+      permissions: ['all'],
+      createdAt: new Date().toISOString()
+    };
     const savedProfile = localStorage.getItem('cortex-user-profile');
     if (savedProfile) {
       try {
@@ -60,19 +73,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         localStorage.removeItem('cortex-user-profile');
       }
     }
-    return null;
+    return guestProfile;
   });
 
-  const [loading, setLoading] = useState(() => {
-    // Direct zero-delay load if session exists in cache
-    const savedCustomUser = localStorage.getItem('cortex-custom-user');
-    const savedGoogleUser = localStorage.getItem('cortex-google-user');
-    const savedProfile = localStorage.getItem('cortex-user-profile');
-    if ((savedCustomUser || savedGoogleUser) && savedProfile) {
-      return false;
-    }
-    return true;
-  });
+  const [loading, setLoading] = useState(false);
 
   const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
 
@@ -237,7 +241,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       } else {
         // Only clear if we are not signed in as custom email/password user
         const savedCustomUser = localStorage.getItem('cortex-custom-user');
-        if (!savedCustomUser) {
+        const isCurrentlyGuest = user && user.uid === 'guest-admin';
+        if (!savedCustomUser && !isCurrentlyGuest) {
           setUser(null);
           setProfile(null);
           setGoogleAccessToken(null);

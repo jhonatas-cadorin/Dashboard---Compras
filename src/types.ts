@@ -18,6 +18,7 @@ export interface PurchaseRecord {
   un: string;
   qtde: number;
   total: number;
+  comprador?: string;
 }
 
 export interface InventoryRecord {
@@ -71,6 +72,7 @@ export interface DashboardData {
   filialTotals?: Record<string, number>;
   filialMonthly?: Record<string, { name: string; value: number }[]>;
   topPartners?: { name: string; value: number }[];
+  compradores?: string[];
 
   // For Missing Items
   inventoryRecords?: InventoryRecord[];
