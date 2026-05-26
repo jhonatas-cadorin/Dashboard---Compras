@@ -1,5 +1,5 @@
 {
-  "name": "Dashboard de Compras ERP",
+  "name": "Dashboard de Compras ERP Cortex",
   "description": "Um dashboard analítico para processamento de planilhas de compras de ERP, com filtragem de filiais e fornecedores, análise de Pareto e evolução mensal.",
   "requestFramePermissions": [],
   "majorCapabilities": [
