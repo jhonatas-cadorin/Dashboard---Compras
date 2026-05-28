@@ -577,24 +577,24 @@ function ItemDetailModal({
         onClick={e => e.stopPropagation()}
       >
         {/* Compact Executive Header */}
-        <div className="flex items-center justify-between px-8 py-5 border-b border-brand-border bg-black/[0.02] dark:bg-black/20">
-          <div className="flex items-center gap-5">
-            <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-black text-sm shadow-sm border ${
+        <div className="flex items-start md:items-center justify-between px-8 py-5 border-b border-brand-border bg-black/[0.02] dark:bg-black/20">
+          <div className="flex items-start md:items-center gap-5 flex-1 min-w-0 mr-4">
+            <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-black text-sm shadow-sm border shrink-0 ${
               item.curva === 'A' ? 'bg-brand-purple text-white border-purple-400/20' :
               item.curva === 'B' ? 'bg-brand-blue text-white border-blue-400/20' :
               'bg-black/5 dark:bg-black/40 border-brand-border text-brand-text-secondary'
             }`}>
               {item.curva}
             </div>
-            <div>
-              <div className="flex items-center gap-3 mb-0.5">
+            <div className="flex-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-3 mb-0.5">
                 <span className="text-[9px] font-black text-brand-text-secondary opacity-40 uppercase tracking-widest font-mono">CODE: #{item.cod}</span>
-                <div className="h-1 w-1 rounded-full bg-brand-border" />
+                <div className="h-1 w-1 rounded-full bg-brand-border hidden sm:block" />
                 <span className="text-[9px] font-black text-brand-blue uppercase tracking-widest font-mono">
                   {cleanFilialName(item.filial)}
                 </span>
               </div>
-              <h2 className="text-lg font-black text-brand-text-primary leading-tight truncate max-w-[400px]">{item.desc}</h2>
+              <h2 className="text-base md:text-[20px] font-black text-brand-text-primary leading-tight break-words py-1 select-all" title={item.desc}>{item.desc}</h2>
             </div>
           </div>
           <div className="flex items-center gap-4">
@@ -4161,25 +4161,27 @@ function Dashboard() {
     localStorage.setItem('cortex-filterABC', filterABC);
   }, [filterABC]);
 
-  // Clean all filters, searches, and branches when changing views, changing dashboards, or refreshing the page
+  // Clean all filters, searches, and branches when returning to the spreadsheet selection page
   useEffect(() => {
-    if (filterPartner !== '') setFilterPartner('');
-    if (filterGroup !== '') setFilterGroup('');
-    if (filterFab !== '') setFilterFab('');
-    if (filterComprador !== '') setFilterComprador('');
-    if (searchTerm !== '') setSearchTerm('');
-    if (debouncedSearchTerm !== '') setDebouncedSearchTerm('');
-    if (filterCriterio !== '') setFilterCriterio('');
-    if (filterABC !== '') setFilterABC('');
-    if (selectedFiliais.length > 0) setSelectedFiliais([]);
-    
-    localStorage.removeItem('cortex-filterGroup');
-    localStorage.removeItem('cortex-filterFab');
-    localStorage.removeItem('cortex-filterComprador');
-    localStorage.removeItem('cortex-searchTerm');
-    localStorage.removeItem('cortex-filterCriterio');
-    localStorage.removeItem('cortex-filterABC');
-  }, [activeModule, appMode, screen]);
+    if (screen === 'selection') {
+      if (filterPartner !== '') setFilterPartner('');
+      if (filterGroup !== '') setFilterGroup('');
+      if (filterFab !== '') setFilterFab('');
+      if (filterComprador !== '') setFilterComprador('');
+      if (searchTerm !== '') setSearchTerm('');
+      if (debouncedSearchTerm !== '') setDebouncedSearchTerm('');
+      if (filterCriterio !== '') setFilterCriterio('');
+      if (filterABC !== '') setFilterABC('');
+      if (selectedFiliais.length > 0) setSelectedFiliais([]);
+      
+      localStorage.removeItem('cortex-filterGroup');
+      localStorage.removeItem('cortex-filterFab');
+      localStorage.removeItem('cortex-filterComprador');
+      localStorage.removeItem('cortex-searchTerm');
+      localStorage.removeItem('cortex-filterCriterio');
+      localStorage.removeItem('cortex-filterABC');
+    }
+  }, [screen]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -4207,6 +4209,27 @@ function Dashboard() {
     return () => document.removeEventListener('fullscreenchange', handleFsChange);
   }, []);
 
+  // Limpeza de cache e dados das planilhas para total privacidade ao sair ou fechar a página
+  useEffect(() => {
+    const handleCleanUp = () => {
+      localStorage.removeItem('cortex_drive_cache_v1');
+      localStorage.removeItem('cortex-screen');
+      localStorage.removeItem('cortex-filterGroup');
+      localStorage.removeItem('cortex-filterFab');
+      localStorage.removeItem('cortex-filterComprador');
+      localStorage.removeItem('cortex-searchTerm');
+      localStorage.removeItem('cortex-filterCriterio');
+      localStorage.removeItem('cortex-filterABC');
+    };
+
+    window.addEventListener('beforeunload', handleCleanUp);
+    window.addEventListener('unload', handleCleanUp);
+    return () => {
+      window.removeEventListener('beforeunload', handleCleanUp);
+      window.removeEventListener('unload', handleCleanUp);
+    };
+  }, []);
+
   const resetToSelection = () => {
     setScreen('selection');
     setFile1(null);
@@ -4223,10 +4246,22 @@ function Dashboard() {
     setSelectedGroupDetails(null);
   };
 
-  const steps = [
-    'Lendo arquivo com SheetJS',
-    'Finalizando visualizações'
-  ];
+  const steps = useMemo(() => {
+    if (appMode === 'purchases' || appMode === 'sales') {
+      return [
+        'Detectando estrutura de ERP',
+        'Filtrando transações NFE',
+        'Agregando dados financeiros',
+        'Finalizando visualizações'
+      ];
+    }
+    return [
+      'Lendo arquivo com SheetJS',
+      'Processando níveis de estoque',
+      'Analisando cobertura e rupturas',
+      'Finalizando visualizações'
+    ];
+  }, [appMode]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement> | React.DragEvent) => {
     let file: File | undefined;
@@ -5161,7 +5196,9 @@ function Dashboard() {
               </button>
             </div>
             <div className="w-12 h-12 border-4 border-brand-card border-t-brand-blue rounded-full animate-spin mb-8" />
-            <h2 className="text-xl font-semibold mb-6">Processando dados financeiros...</h2>
+            <h2 className="text-xl font-semibold mb-6">
+              {appMode === 'purchases' || appMode === 'sales' ? "Processando dados financeiros..." : "Processando dados de estoque..."}
+            </h2>
             <div className="w-full max-w-sm space-y-2">
               {steps.map((step, idx) => (
                 <div 
