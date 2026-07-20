@@ -47,6 +47,7 @@ export interface InventoryRecord {
   t2: number;
   t3: number;
   t4: number;
+  mesesByYear?: Record<number, number[]>;
 }
 
 export interface DashboardData {
@@ -54,6 +55,7 @@ export interface DashboardData {
   filename: string;
   rowCount: number;
   filiais: string[];
+  availableYears?: number[];
   
   // For Purchases/Sales
   records?: PurchaseRecord[];

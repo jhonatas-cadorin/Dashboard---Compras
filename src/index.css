@@ -9,28 +9,44 @@
   --brand-border: rgba(148, 163, 184, 0.18); 
   
   --brand-text-primary: #0f172a; 
-  --brand-text-secondary: #4b5563; 
+  --brand-text-secondary: #334155; /* Slate-700 for improved WCAG AA body contrast */
   
   --glass-bg: rgba(244, 246, 248, 0.85);
   --input-bg: #ffffff;
   --input-border: #cbd5e1;
   --input-text: #0f172a;
+
+  --brand-blue: #1d4ed8;     /* High contrast blue for text and borders in light mode */
+  --brand-green: #047857;    /* Rich green for high contrast text and borders */
+  --brand-red: #b91c1c;      /* Rich red for high contrast text and borders */
+  --brand-orange: #c2410c;   /* Rich orange for high contrast text and borders */
+  --brand-yellow: #a16207;   /* Rich yellow/amber for high contrast text and borders */
+  --brand-purple: #6d28d9;   /* Rich purple for high contrast text and borders */
+  --brand-cyan: #0369a1;     /* Rich cyan for high contrast text and borders */
 }
 
 .dark {
-  --brand-bg: #030712;
-  --brand-container: #0b0c10;
-  --brand-card: #0f1118;
-  --brand-hover: #161a24;
-  --brand-border: rgba(255, 255, 255, 0.05);
+  --brand-bg: #090d1a;        /* Deep, rich dark slate backdrop for lower eye strain */
+  --brand-container: #101524; /* Refined slightly elevated dark container */
+  --brand-card: #161c2e;      /* Elegant card background with excellent separation */
+  --brand-hover: #212942;     /* Distinct hover transition state */
+  --brand-border: rgba(255, 255, 255, 0.08); /* Finer, high-contrast borders */
   
-  --brand-text-primary: #f9fafb;
-  --brand-text-secondary: #9ca3af;
+  --brand-text-primary: #ffffff;
+  --brand-text-secondary: #e2e8f0; /* Slate-200 for incredible contrast on dark background */
   
-  --glass-bg: rgba(15, 17, 24, 0.65);
+  --glass-bg: rgba(16, 21, 36, 0.75);
   --input-bg: rgba(0, 0, 0, 0.4);
-  --input-border: rgba(255, 255, 255, 0.1);
+  --input-border: rgba(255, 255, 255, 0.12);
   --input-text: #ffffff;
+
+  --brand-blue: #3b82f6;     /* Vibrant bright blue for high visibility on dark */
+  --brand-green: #34d399;    /* Vibrant emerald for high visibility on dark */
+  --brand-red: #f87171;      /* Vibrant red for high visibility on dark */
+  --brand-orange: #fb923c;   /* Vibrant orange for high visibility on dark */
+  --brand-yellow: #facc15;   /* Vibrant yellow for high visibility on dark */
+  --brand-purple: #c084fc;   /* Vibrant purple for high visibility on dark */
+  --brand-cyan: #22d3ee;     /* Vibrant cyan for high visibility on dark */
 }
 
 @theme {
@@ -43,13 +59,13 @@
   --color-brand-hover: var(--brand-hover);
   --color-brand-border: var(--brand-border);
   
-  --color-brand-blue: #2563eb;
-  --color-brand-green: #10b981;
-  --color-brand-red: #ef4444;
-  --color-brand-orange: #f59e0b;
-  --color-brand-yellow: #eab308;
-  --color-brand-purple: #7c3aed;
-  --color-brand-cyan: #06b6d4;
+  --color-brand-blue: var(--brand-blue);
+  --color-brand-green: var(--brand-green);
+  --color-brand-red: var(--brand-red);
+  --color-brand-orange: var(--brand-orange);
+  --color-brand-yellow: var(--brand-yellow);
+  --color-brand-purple: var(--brand-purple);
+  --color-brand-cyan: var(--brand-cyan);
   
   --color-brand-text-primary: var(--brand-text-primary);
   --color-brand-text-secondary: var(--brand-text-secondary);
@@ -189,4 +205,60 @@
     box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.02), 0 2px 4px -1px rgba(0, 0, 0, 0.02);
   }
 }
+
+/* Dark mode font contrast & opacity enhancements */
+.dark html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Ensure text on cards is extremely legible and never too faint */
+.dark .opacity-10,
+.dark .dark\:opacity-10 {
+  opacity: 0.45 !important;
+}
+
+.dark .opacity-20,
+.dark .dark\:opacity-20 {
+  opacity: 0.65 !important;
+}
+
+.dark .opacity-30,
+.dark .dark\:opacity-30 {
+  opacity: 0.78 !important; /* Boost extremely low contrast details */
+}
+
+.dark .opacity-40,
+.dark .dark\:opacity-40 {
+  opacity: 0.85 !important; /* Boost medium contrast details */
+}
+
+.dark .opacity-50,
+.dark .dark\:opacity-50 {
+  opacity: 0.90 !important;
+}
+
+.dark .opacity-60,
+.dark .dark\:opacity-60 {
+  opacity: 0.95 !important;
+}
+
+.dark .opacity-70,
+.dark .dark\:opacity-70 {
+  opacity: 0.98 !important;
+}
+
+.dark .opacity-80,
+.dark .dark\:opacity-80,
+.dark .opacity-90,
+.dark .dark\:opacity-90 {
+  opacity: 1 !important;
+}
+
+/* Subpixel text rendering support for card text in dark mode */
+.dark .bg-brand-card,
+.dark [class*="bg-brand-card"] {
+  text-shadow: 0 0.5px 1px rgba(0, 0, 0, 0.15);
+}
+
 

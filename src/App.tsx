@@ -77,7 +77,8 @@ import {
   Send,
   Check,
   MessageSquare,
-  Phone
+  Phone,
+  Calendar
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -296,6 +297,66 @@ async function carregarPlanilha(): Promise<DashboardData | null> {
       return parseFloat(v) || 0;
     };
 
+    // Helper to parse month index and year from a key
+    const parseMonthAndYear = (key: string): { monthIndex: number; year: number } | null => {
+      const normKey = key.toLowerCase().trim()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+      const monthTerms = [
+        { index: 0, names: ['janeiro', 'jan', 'm1', 'mes_1'] },
+        { index: 1, names: ['fevereiro', 'fev', 'm2', 'mes_2'] },
+        { index: 2, names: ['marco', 'mar', 'm3', 'mes_3'] },
+        { index: 3, names: ['abril', 'abr', 'm4', 'mes_4'] },
+        { index: 4, names: ['maio', 'mai', 'm5', 'mes_5'] },
+        { index: 5, names: ['junho', 'jun', 'm6', 'mes_6'] },
+        { index: 6, names: ['julho', 'jul', 'm7', 'mes_7'] },
+        { index: 7, names: ['agosto', 'ago', 'm8', 'mes_8'] },
+        { index: 8, names: ['setembro', 'set', 'm9', 'mes_9'] },
+        { index: 9, names: ['outubro', 'out', 'm10', 'mes_10'] },
+        { index: 10, names: ['novembro', 'nov', 'm11', 'mes_11'] },
+        { index: 11, names: ['dezembro', 'dez', 'm12', 'mes_12'] }
+      ];
+
+      let foundMonthIndex = -1;
+      for (const term of monthTerms) {
+        for (const name of term.names) {
+          if (normKey === name || normKey.startsWith(name + '_') || normKey.startsWith(name + '/') || normKey.startsWith(name + ' ') || (normKey.includes(name) && !normKey.includes('media') && !normKey.includes('meta'))) {
+            foundMonthIndex = term.index;
+            break;
+          }
+        }
+        if (foundMonthIndex !== -1) break;
+      }
+
+      if (foundMonthIndex === -1) return null;
+
+      // Extract year (e.g. check for 4 digits like 2025 or 2 digits like 25, 26, 27, 28)
+      const matchYear4 = normKey.match(/\b(20\d{2})\b/) || normKey.match(/_(20\d{2})_/) || normKey.match(/\/(20\d{2})/);
+      if (matchYear4) {
+        return { monthIndex: foundMonthIndex, year: parseInt(matchYear4[1], 10) };
+      }
+
+      const matchYear2 = normKey.match(/\b(2[5-9]|3[0-5])\b/) || normKey.match(/_(2[5-9]|3[0-5])/) || normKey.match(/\/(2[5-9]|3[0-5])/) || normKey.match(/(2[5-9]|3[0-5])$/);
+      if (matchYear2) {
+        return { monthIndex: foundMonthIndex, year: 2000 + parseInt(matchYear2[1], 10) };
+      }
+
+      return null;
+    };
+
+    const globalDetectedYearsSet = new Set<number>();
+    if (normalizedData.length > 0) {
+      Object.keys(normalizedData[0]).forEach(key => {
+        const parsed = parseMonthAndYear(key);
+        if (parsed) {
+          globalDetectedYearsSet.add(parsed.year);
+        }
+      });
+    }
+    const availableYears = globalDetectedYearsSet.size > 0 
+      ? Array.from(globalDetectedYearsSet).sort() 
+      : [2025];
+
     const inventoryRecords = normalizedData.map((r, index) => {
        // Mapeamento extensivo de aliases + Fallback por posição
        const saldo = parseNum(r.saldo_atual_fisico || r.saldo || r.estoque || r.qtd || r.quantidade || r.saldo_atual || r.estoque_atual || r.col_2 || r.col_3);
@@ -317,6 +378,33 @@ async function carregarPlanilha(): Promise<DashboardData | null> {
          parseNum(r.nov || r.novembro || r.mes_11 || r.m11), 
          parseNum(r.dez || r.dezembro || r.mes_12 || r.m12)
        ];
+
+       // Meses by Year
+       const mesesByYear: Record<number, number[]> = {};
+       availableYears.forEach(yr => {
+         mesesByYear[yr] = Array(12).fill(0);
+       });
+
+       Object.keys(r).forEach(key => {
+         const parsed = parseMonthAndYear(key);
+         if (parsed) {
+           if (!mesesByYear[parsed.year]) {
+             mesesByYear[parsed.year] = Array(12).fill(0);
+           }
+           mesesByYear[parsed.year][parsed.monthIndex] = parseNum(r[key]);
+         }
+       });
+
+       // Fallback for default year
+       const defaultYear = availableYears[0] || 2025;
+       if (!mesesByYear[defaultYear]) {
+         mesesByYear[defaultYear] = [...meses];
+       } else {
+         const sumY = mesesByYear[defaultYear].reduce((a, b) => a + b, 0);
+         if (sumY === 0) {
+           mesesByYear[defaultYear] = [...meses];
+         }
+       }
 
        // Codigo e Descrição mais flexíveis
        const cod = String(r.n_do_item || r.n_item || r.cod || r.codigo || r.sku || r.ref || r.referencia || r.id || r.col_0 || '').trim();
@@ -372,6 +460,7 @@ async function carregarPlanilha(): Promise<DashboardData | null> {
          t4: meses.slice(9, 12).reduce((a, b) => a + b, 0),
          sheetName: usedSheet,
          sheetRowIdx: headerRowIdx + index + 2,
+         mesesByYear,
          sheetColIdx: saldoColIdx
        };
     }).filter((r): r is any => r !== null); 
@@ -414,6 +503,7 @@ async function carregarPlanilha(): Promise<DashboardData | null> {
       filiais,
       groups,
       fabs,
+      availableYears,
       inventoryRecords
     };
 
@@ -490,23 +580,25 @@ function ItemDetailModal({
   item, 
   data, 
   onClose,
-  theme
+  theme,
+  selectedFiliais = []
 }: { 
   item: any, 
   data: DashboardData, 
   onClose: () => void,
-  theme: 'light' | 'dark'
+  theme: 'light' | 'dark',
+  selectedFiliais?: string[]
 }) {
   const networkOptions = useMemo(() => (data.inventoryRecords || [])
     .filter(r => r.cod === item.cod && r.filial.split(' - ')[0] !== item.filial.split(' - ')[0] && r.saldoTransferivel > 0)
     .sort((a, b) => b.saldoTransferivel - a.saldoTransferivel), [data.inventoryRecords, item]);
 
   const chartColors = useMemo(() => ({
-    stroke: "#3b82f6",
-    grid: theme === 'dark' ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.05)",
-    text: theme === 'dark' ? "#6b7280" : "#64748b",
-    tooltipBg: theme === 'dark' ? "#0f1115" : "#ffffff",
-    tooltipText: theme === 'dark' ? "#ffffff" : "#0f172a"
+    stroke: theme === 'dark' ? "#3b82f6" : "#1d4ed8",
+    grid: theme === 'dark' ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)",
+    text: theme === 'dark' ? "#9ca3af" : "#334155",
+    tooltipBg: theme === 'dark' ? "#1f2937" : "#ffffff",
+    tooltipText: theme === 'dark' ? "#f9fafb" : "#0f172a"
   }), [theme]);
 
   const stats = [
@@ -520,6 +612,14 @@ function ItemDetailModal({
   const [recommendation, setRecommendation] = useState<string>(item.recommendation || 'Gerando recomendação inteligente...');
   const [loadingAI, setLoadingAI] = useState(false);
   const [selectedBranch, setSelectedBranch] = useState<any>(null);
+
+  const selectedBranchesRecords = useMemo(() => {
+    if (!selectedFiliais || selectedFiliais.length === 0) return [];
+    return (data.inventoryRecords || []).filter(r => 
+      r.cod === item.cod && 
+      selectedFiliais.includes(r.filial)
+    );
+  }, [data.inventoryRecords, item.cod, selectedFiliais]);
 
   useEffect(() => {
     if (!item.recommendation && !loadingAI) {
@@ -618,7 +718,7 @@ function ItemDetailModal({
           {/* Mini Cards Grid */}
           <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
             {stats.map((stat, idx) => (
-              <div key={idx} className="bg-white dark:bg-brand-card/30 border border-brand-border p-3.5 rounded-2xl flex flex-col hover:border-brand-blue/20 transition-all group shadow-sm">
+              <div key={idx} className="bg-brand-card dark:bg-brand-card/30 border border-brand-border dark:border-white/5 p-3.5 rounded-2xl flex flex-col hover:border-brand-blue/20 transition-all group shadow-sm">
                  <div className="flex justify-between items-start mb-2">
                     <span className="text-[7px] font-black text-brand-text-secondary uppercase tracking-[0.1em] font-mono opacity-80 dark:opacity-60">{stat.label}</span>
                     <stat.icon className={`w-3.5 h-3.5 ${stat.color} opacity-60 dark:opacity-40 group-hover:opacity-100 transition-opacity`} />
@@ -708,7 +808,7 @@ function ItemDetailModal({
                           className={`w-full flex justify-between items-center px-3 py-2.5 rounded-xl border transition-all text-left group ${
                             isSelected 
                               ? 'border-brand-blue bg-brand-blue/[0.04] dark:bg-brand-blue/[0.08] shadow-sm' 
-                              : 'border-brand-border bg-gray-50 dark:bg-black/20 hover:border-brand-green/30 hover:bg-gray-100 dark:hover:bg-white/[0.05]'
+                              : 'border-brand-border dark:border-white/5 bg-brand-bg/40 dark:bg-white/5 hover:border-brand-green/30 hover:bg-brand-hover dark:hover:bg-white/[0.05]'
                           }`}
                         >
                           <div className="flex items-center gap-2.5">
@@ -760,6 +860,135 @@ function ItemDetailModal({
                 </div>
              </div>
           </div>
+
+          {/* Movimentação das Filiais Selecionadas no Filtro */}
+          <AnimatePresence>
+            {selectedBranchesRecords.length > 0 && (
+              <motion.div 
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: 0.3 }}
+                className="p-5 rounded-2xl bg-brand-purple/[0.03] border border-brand-purple/20 space-y-4 relative overflow-hidden group"
+              >
+                <div className="flex justify-between items-center">
+                  <h4 className="text-[10px] font-black text-brand-purple uppercase tracking-[0.2em] font-mono flex items-center gap-1.5">
+                    <Activity className="w-4 h-4" /> MOVIMENTAÇÃO DAS FILIAIS DO FILTRO
+                  </h4>
+                  <span className="text-[8px] font-black bg-brand-purple/10 text-brand-purple px-2 py-0.5 rounded-full uppercase tracking-wider font-mono">
+                    {selectedBranchesRecords.length} filiais ativas
+                  </span>
+                </div>
+
+                <div className="space-y-4 max-h-[350px] overflow-y-auto pr-1 custom-scrollbar">
+                  {selectedBranchesRecords.map((br, index) => (
+                    <div 
+                      key={index} 
+                      className="p-4 rounded-xl bg-white/5 dark:bg-black/20 border border-brand-border dark:border-white/5 space-y-3"
+                    >
+                      <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2 border-b border-brand-border dark:border-white/5 pb-2">
+                        <span className="text-[10px] font-black text-brand-text-primary dark:text-white uppercase font-mono">
+                          {cleanFilialName(br.filial)}
+                        </span>
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-[9px] font-bold text-brand-text-secondary uppercase">
+                          <span>Estoque: <strong className="text-brand-text-primary dark:text-white font-black">{br.saldo.toLocaleString()} {br.un}</strong></span>
+                          <span>Média: <strong className="text-brand-text-primary dark:text-white font-black">{(br.media || 0).toFixed(1)}/mês</strong></span>
+                          <span>Cobertura: <strong className={`${br.cobertura < 1 ? 'text-brand-red' : 'text-brand-green'} font-black`}>{(br.cobertura || 0).toFixed(1)} meses</strong></span>
+                        </div>
+                      </div>
+                      
+                      {/* Monthly columns */}
+                      <div className="overflow-x-auto custom-scrollbar">
+                        <div className="flex gap-1.5 pb-1 min-w-[550px] justify-between">
+                          {MONTH_NAMES.map((name, i) => {
+                            const val = br.meses?.[i] || 0;
+                            return (
+                              <div key={i} className="flex-1 min-w-[40px] text-center bg-white/5 dark:bg-black/10 py-1.5 rounded-lg border border-brand-border/10">
+                                <div className="text-[7px] font-black text-brand-text-secondary/55 uppercase font-mono">{name}</div>
+                                <div className={`text-[9px] font-black mt-0.5 ${val > 0 ? 'text-brand-purple' : 'text-brand-text-secondary opacity-30'}`}>
+                                  {val.toLocaleString()}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Detailed Selected Branch Movement Section */}
+          <AnimatePresence>
+            {selectedBranch && (
+              <motion.div 
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: 0.3 }}
+                className="p-5 rounded-2xl bg-brand-green/[0.03] border border-brand-green/20 relative overflow-hidden group space-y-4"
+              >
+                <div className="flex justify-between items-center">
+                  <h4 className="text-[10px] font-black text-brand-green uppercase tracking-[0.2em] font-mono flex items-center gap-1.5">
+                    <Activity className="w-4 h-4" /> MOVIMENTAÇÃO DETALHADA — {cleanFilialName(selectedBranch.filial)}
+                  </h4>
+                  <button 
+                    onClick={() => setSelectedBranch(null)}
+                    className="text-[9px] font-black text-brand-red uppercase tracking-widest hover:underline hover:brightness-110 active:scale-95 transition-all flex items-center gap-1"
+                  >
+                    <X className="w-3 h-3" /> Limpar Filtro
+                  </button>
+                </div>
+
+                {/* Sub-KPIs grid of the selected branch */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 bg-white/5 dark:bg-black/10 p-3 rounded-xl border border-brand-border dark:border-white/5">
+                  <div className="flex flex-col">
+                    <span className="text-[8px] font-black text-brand-text-secondary uppercase tracking-wider">Estoque Atual</span>
+                    <span className="text-sm font-black text-brand-text-primary dark:text-white">
+                      {selectedBranch.saldo.toLocaleString()} <span className="text-[9px] font-bold text-brand-text-secondary">{selectedBranch.un}</span>
+                    </span>
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-[8px] font-black text-brand-text-secondary uppercase tracking-wider">Movimentação 12M</span>
+                    <span className="text-sm font-black text-brand-text-primary dark:text-white">
+                      {selectedBranch.total_mov.toLocaleString()} <span className="text-[9px] font-bold text-brand-text-secondary">{selectedBranch.un}</span>
+                    </span>
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-[8px] font-black text-brand-text-secondary uppercase tracking-wider">Média Mensal</span>
+                    <span className="text-sm font-black text-brand-text-primary dark:text-white">
+                      {(selectedBranch.media || 0).toFixed(1)} <span className="text-[9px] font-bold text-brand-text-secondary">{selectedBranch.un}/mês</span>
+                    </span>
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-[8px] font-black text-brand-text-secondary uppercase tracking-wider">Cobertura</span>
+                    <span className="text-sm font-black text-brand-text-primary dark:text-white">
+                      {(selectedBranch.cobertura || 0).toFixed(1)} <span className="text-[9px] font-bold text-brand-text-secondary">meses</span>
+                    </span>
+                  </div>
+                </div>
+
+                {/* Monthly details of selected branch */}
+                <div className="overflow-x-auto custom-scrollbar">
+                  <div className="flex gap-2 pb-1 min-w-[600px] justify-between">
+                    {MONTH_NAMES.map((name, i) => {
+                      const val = selectedBranch.meses?.[i] || 0;
+                      return (
+                        <div key={i} className="flex-1 min-w-[45px] text-center bg-white/5 dark:bg-black/20 py-2 rounded-lg border border-brand-border dark:border-white/5">
+                          <div className="text-[8px] font-black text-brand-text-secondary/60 uppercase font-mono">{name}</div>
+                          <div className={`text-[10px] font-black mt-1 ${val > 0 ? 'text-brand-green' : 'text-brand-text-secondary opacity-40'}`}>
+                            {val.toLocaleString()}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
         <div className="px-8 py-4 border-t border-brand-border bg-black/[0.02] dark:bg-black/20 flex items-center justify-between">
@@ -918,10 +1147,10 @@ function InventoryDashboardView({
   };
 
   const chartColors = useMemo(() => ({
-    grid: theme === 'dark' ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.06)",
-    text: theme === 'dark' ? "#6b7280" : "#475569",
-    tooltipBg: theme === 'dark' ? "#0f1115" : "#ffffff",
-    tooltipText: theme === 'dark' ? "#ffffff" : "#0f172a"
+    grid: theme === 'dark' ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)",
+    text: theme === 'dark' ? "#9ca3af" : "#334155",
+    tooltipBg: theme === 'dark' ? "#1f2937" : "#ffffff",
+    tooltipText: theme === 'dark' ? "#f9fafb" : "#0f172a"
   }), [theme]);
   const perPage = 80;
   
@@ -1777,7 +2006,7 @@ function InventoryDashboardView({
                               itemsList.push(
                                 <div key={sourceName} className="flex justify-between items-center text-xs font-bold text-brand-text-primary">
                                   <span>{cleanFilialName(sourceName)}</span>
-                                  <span className="text-brand-blue font-black">{taken.toLocaleString()} <span className="text-[8px] text-gray-500">{transferSelection.item.un}</span></span>
+                                  <span className="text-brand-blue font-black">{taken.toLocaleString()} <span className="text-[8px] text-brand-text-secondary opacity-70">{transferSelection.item.un}</span></span>
                                 </div>
                               );
                               remaining -= taken;
@@ -1847,6 +2076,13 @@ function InventoryDashboardView({
             ].map((card, idx) => {
               const isActive = filters.criterio === card.id;
               const Icon = card.icon as any;
+              const colorClass = 
+                card.color === 'brand-blue' ? 'text-brand-blue' :
+                card.color === 'brand-red' ? 'text-brand-red' :
+                card.color === 'brand-green' ? 'text-brand-green' :
+                card.color === 'brand-orange' ? 'text-brand-orange' :
+                card.color === 'brand-purple' ? 'text-brand-purple' :
+                card.color === 'brand-text-secondary' ? 'text-brand-text-secondary' : 'text-brand-text-primary';
               
               return (
                 <motion.button
@@ -1862,17 +2098,15 @@ function InventoryDashboardView({
                   }`}
                 >
                   <div className="flex items-center justify-between w-full relative z-10">
-                    <div className={`p-1.5 rounded-lg ${isActive ? 'bg-brand-blue/20 text-brand-blue' : 'bg-gray-100 dark:bg-white/5 text-brand-text-secondary'}`}>
-                      <Icon className="w-3.5 h-3.5" />
-                    </div>
+                    <Icon className={`w-4 h-4 ${colorClass}`} />
                     {isActive && <div className="w-1.5 h-1.5 rounded-full bg-brand-blue animate-pulse" />}
                   </div>
                   
                   <div className="mt-3 relative z-10 text-left">
-                    <div className={`text-3xl font-black tracking-tighter leading-tight mb-0.5 text-${card.color}`}>
+                    <div className={`text-3xl font-black tracking-tighter leading-tight mb-0.5 ${colorClass}`}>
                       {card.count.toLocaleString()}
                     </div>
-                    <div className={`text-[11px] font-black uppercase tracking-[0.1em] text-${card.color} opacity-80`}>
+                    <div className={`text-[11px] font-black uppercase tracking-[0.1em] opacity-80 ${colorClass}`}>
                       {card.label}
                     </div>
                   </div>
@@ -1910,7 +2144,7 @@ function InventoryDashboardView({
                     className={`px-6 py-4 rounded-xl border-2 transition-all cursor-pointer group flex items-center justify-center min-w-[140px] max-w-[200px] flex-1 min-h-[70px] relative overflow-hidden backdrop-blur-xl shadow-soft ${
                       isSelected 
                       ? 'bg-brand-purple shadow-[0_20px_40px_rgba(168,85,247,0.4)] border-brand-purple ring-2 ring-white/10' 
-                      : 'bg-brand-card dark:bg-white/5 border-brand-border dark:border-white/10 hover:border-brand-purple/50 hover:bg-brand-hover hover:shadow-md'
+                      : 'bg-brand-bg/40 dark:bg-white/5 border-brand-border dark:border-white/10 hover:border-brand-purple/50 hover:bg-brand-hover hover:shadow-md'
                     } ${!active ? 'opacity-30 grayscale' : 'opacity-100'}`}
                   >
                     <div className="relative z-10 text-center">
@@ -1936,49 +2170,69 @@ function InventoryDashboardView({
 
         {/* Predictive Control Bar */}
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-brand-container/30 border border-brand-border/20 p-3 rounded-[1.5rem] premium-shadow premium-glass">
-          <div className="flex items-center gap-4">
-          <div className="flex p-1 bg-gray-200 dark:bg-black/40 rounded-xl border border-brand-border dark:border-white/5 backdrop-blur-md transition-colors">
+          <div className="flex items-center gap-4 w-full md:w-auto">
+            <div className="flex p-1 bg-brand-card dark:bg-black/60 rounded-xl border border-brand-border dark:border-white/5 backdrop-blur-md transition-colors w-full md:w-auto overflow-x-auto custom-scrollbar flex-nowrap gap-1 shadow-inner">
               <button 
                 onClick={() => setViewMode('standard')}
-                className={`flex items-center gap-2 px-6 py-2.5 rounded-lg text-[9px] font-black uppercase tracking-[0.2em] transition-all ${viewMode === 'standard' ? 'bg-brand-blue text-white shadow-lg' : 'text-brand-text-secondary hover:text-brand-text-primary dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5'}`}
+                className={`flex items-center gap-2 px-5 py-2 rounded-lg text-[10px] font-black uppercase tracking-[0.2em] transition-all shrink-0 ${
+                  viewMode === 'standard' 
+                    ? 'bg-brand-blue text-white shadow-lg shadow-brand-blue/30 scale-[1.02] z-10' 
+                    : 'text-brand-text-secondary hover:text-brand-text-primary hover:bg-brand-hover dark:text-zinc-400 dark:hover:text-white dark:hover:bg-white/5'
+                }`}
               >
                 <LayoutDashboard className="w-3.5 h-3.5" />
                 Operacional
               </button>
               <button 
                 onClick={() => setViewMode('predictive')}
-                className={`flex items-center gap-2 px-6 py-2.5 rounded-lg text-[9px] font-black uppercase tracking-[0.2em] transition-all ${viewMode === 'predictive' ? 'bg-brand-purple text-white shadow-lg' : 'text-brand-text-secondary hover:text-brand-text-primary dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5'}`}
+                className={`flex items-center gap-2 px-5 py-2 rounded-lg text-[10px] font-black uppercase tracking-[0.2em] transition-all shrink-0 ${
+                  viewMode === 'predictive' 
+                    ? 'bg-brand-purple text-white shadow-lg shadow-brand-purple/30 scale-[1.02] z-10' 
+                    : 'text-brand-text-secondary hover:text-brand-text-primary hover:bg-brand-hover dark:text-zinc-400 dark:hover:text-white dark:hover:bg-white/5'
+                }`}
               >
                 <Clock className="w-3.5 h-3.5" />
                 Inteligência Preditiva
               </button>
               <button 
                 onClick={() => setViewMode('purchases')}
-                className={`flex items-center gap-2 px-6 py-2.5 rounded-lg text-[9px] font-black uppercase tracking-[0.2em] transition-all relative ${viewMode === 'purchases' ? 'bg-brand-red text-white shadow-lg' : 'text-brand-text-secondary hover:text-brand-text-primary dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5'}`}
+                className={`flex items-center gap-2 px-5 py-2 rounded-lg text-[10px] font-black uppercase tracking-[0.2em] transition-all relative shrink-0 ${
+                  viewMode === 'purchases' 
+                    ? 'bg-brand-red text-white shadow-lg shadow-brand-red/30 scale-[1.02] z-10' 
+                    : 'text-brand-text-secondary hover:text-brand-text-primary hover:bg-brand-hover dark:text-zinc-400 dark:hover:text-white dark:hover:bg-white/5'
+                }`}
               >
                 <ShoppingCart className="w-3.5 h-3.5" />
                 Compras
                 {purchaseItems.length > 0 && (
-                  <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-brand-red text-[8px] font-black text-white ring-2 ring-brand-container">
+                  <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-brand-red text-[8px] font-black text-white ring-2 ring-brand-card dark:ring-zinc-950">
                     {purchaseItems.length}
                   </span>
                 )}
               </button>
               <button 
                 onClick={() => setViewMode('transfers')}
-                className={`flex items-center gap-2 px-6 py-2.5 rounded-lg text-[9px] font-black uppercase tracking-[0.2em] transition-all relative ${viewMode === 'transfers' ? 'bg-brand-green text-white shadow-lg' : 'text-brand-text-secondary hover:text-brand-text-primary dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5'}`}
+                className={`flex items-center gap-2 px-5 py-2 rounded-lg text-[10px] font-black uppercase tracking-[0.2em] transition-all relative shrink-0 ${
+                  viewMode === 'transfers' 
+                    ? 'bg-brand-green text-white shadow-lg shadow-brand-green/30 scale-[1.02] z-10' 
+                    : 'text-brand-text-secondary hover:text-brand-text-primary hover:bg-brand-hover dark:text-zinc-400 dark:hover:text-white dark:hover:bg-white/5'
+                }`}
               >
                 <RefreshCcw className="w-3.5 h-3.5" />
                 Transferências
                 {transferItems.length > 0 && (
-                  <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-brand-red text-[8px] font-black text-white ring-2 ring-brand-container">
+                  <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-brand-red text-[8px] font-black text-white ring-2 ring-brand-card dark:ring-zinc-950">
                     {transferItems.length}
                   </span>
                 )}
               </button>
               <button 
                 onClick={() => setViewMode('strategic')}
-                className={`flex items-center gap-2 px-6 py-2.5 rounded-lg text-[9px] font-black uppercase tracking-[0.2em] transition-all ${viewMode === 'strategic' ? 'bg-brand-blue text-white shadow-lg' : 'text-brand-text-secondary hover:text-brand-text-primary dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5'}`}
+                className={`flex items-center gap-2 px-5 py-2 rounded-lg text-[10px] font-black uppercase tracking-[0.2em] transition-all shrink-0 ${
+                  viewMode === 'strategic' 
+                    ? 'bg-brand-blue text-white shadow-lg shadow-brand-blue/30 scale-[1.02] z-10' 
+                    : 'text-brand-text-secondary hover:text-brand-text-primary hover:bg-brand-hover dark:text-zinc-400 dark:hover:text-white dark:hover:bg-white/5'
+                }`}
               >
                 <BarChart3 className="w-3.5 h-3.5" />
                 KPIs Estratégicos
@@ -2035,7 +2289,7 @@ function InventoryDashboardView({
 
 
                   {(viewMode === 'standard' || viewMode === 'predictive') && (
-                    <div className="flex items-center gap-1.5 p-1 bg-gray-100 dark:bg-black/40 rounded-2xl border border-brand-border/40 backdrop-blur-xl">
+                    <div className="flex items-center gap-1.5 p-1 bg-brand-card dark:bg-black/60 rounded-2xl border border-brand-border dark:border-white/5 backdrop-blur-xl shadow-inner w-full md:w-auto overflow-x-auto custom-scrollbar flex-nowrap">
                       {[
                         { id: '', label: 'Panorama Geral', icon: Layers, color: 'brand-blue' },
                         { id: 'COMPRA', label: 'Direcionados para Compra', icon: ShoppingCart, color: 'brand-red' },
@@ -2044,10 +2298,14 @@ function InventoryDashboardView({
                         <button
                           key={tab.id}
                           onClick={() => setFilters.setCriterio(tab.id)}
-                          className={`flex items-center gap-3 px-6 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all relative overflow-hidden group ${
+                          className={`flex items-center gap-3 px-5 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all relative overflow-hidden group shrink-0 ${
                             filters.criterio === tab.id 
-                            ? `bg-${tab.color} text-white shadow-lg scale-[1.02] z-10` 
-                            : 'text-brand-text-secondary hover:text-brand-text-primary dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 opacity-60 hover:opacity-100'
+                            ? `${
+                                tab.color === 'brand-blue' ? 'bg-brand-blue shadow-lg shadow-brand-blue/30' :
+                                tab.color === 'brand-red' ? 'bg-brand-red shadow-lg shadow-brand-red/30' :
+                                tab.color === 'brand-green' ? 'bg-brand-green shadow-lg shadow-brand-green/30' : 'bg-brand-blue'
+                              } text-white scale-[1.02] z-10` 
+                            : 'text-brand-text-secondary hover:text-brand-text-primary hover:bg-brand-hover dark:text-zinc-400 dark:hover:text-white dark:hover:bg-white/5'
                           }`}
                         >
                           <tab.icon className={`w-4 h-4 ${filters.criterio === tab.id ? 'animate-pulse' : ''}`} />
@@ -2067,16 +2325,24 @@ function InventoryDashboardView({
                     <>
                       <div className="h-6 w-px bg-brand-border mx-2" />
                       
-                      <div className="flex bg-gray-100 dark:bg-black/20 border border-brand-border rounded-xl p-1 gap-1">
+                      <div className="flex bg-brand-card dark:bg-black/60 border border-brand-border dark:border-white/5 rounded-xl p-0.5 gap-0.5 shadow-inner">
                         <button
                           onClick={() => setViewMode('standard')}
-                          className={`px-3 py-1.5 rounded-lg text-[9px] font-black transition-all ${viewMode === 'standard' ? 'bg-brand-blue text-white shadow-lg' : 'text-brand-text-secondary opacity-40 hover:opacity-100 dark:hover:opacity-80'}`}
+                          className={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all shrink-0 ${
+                            viewMode === 'standard' 
+                              ? 'bg-brand-blue text-white shadow-lg shadow-brand-blue/30 scale-[1.02] z-10' 
+                              : 'text-brand-text-secondary hover:text-brand-text-primary hover:bg-brand-hover dark:text-zinc-400 dark:hover:text-white dark:hover:bg-white/5'
+                          }`}
                         >
                           Padrão
                         </button>
                         <button
                           onClick={() => setViewMode('predictive')}
-                          className={`px-3 py-1.5 rounded-lg text-[9px] font-black transition-all ${viewMode === 'predictive' ? 'bg-brand-blue text-white shadow-lg' : 'text-brand-text-secondary opacity-40 hover:opacity-100 dark:hover:opacity-80'}`}
+                          className={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all shrink-0 ${
+                            viewMode === 'predictive' 
+                              ? 'bg-brand-purple text-white shadow-lg shadow-brand-purple/30 scale-[1.02] z-10' 
+                              : 'text-brand-text-secondary hover:text-brand-text-primary hover:bg-brand-hover dark:text-zinc-400 dark:hover:text-white dark:hover:bg-white/5'
+                          }`}
                         >
                           Preditivo
                         </button>
@@ -2157,12 +2423,12 @@ function InventoryDashboardView({
                       transition={{ delay: (idx % 12) * 0.02 }}
                       key={`${r.cod}-${r.filial}-${idx}`} 
                       onClick={() => setSelectedItem(r)}
-                      className="group relative bg-white dark:bg-zinc-900 border border-brand-border/50 rounded-3xl overflow-hidden hover:border-brand-purple/30 transition-all cursor-pointer shadow-[0_4px_20px_rgba(0,0,0,0.03)] dark:shadow-none hover:shadow-2xl hover:shadow-brand-purple/5 flex flex-col h-full"
+                      className="group relative bg-brand-card dark:bg-brand-card/30 border border-brand-border dark:border-white/5 rounded-[2rem] overflow-hidden hover:border-brand-purple/40 dark:hover:border-brand-purple/30 transition-all duration-300 cursor-pointer shadow-md hover:shadow-2xl hover:shadow-brand-purple/10 dark:hover:shadow-brand-purple/5 hover:scale-[1.01] flex flex-col h-full"
                     >
                       {/* Status Bar */}
                       <div className="h-1.5 w-full flex">
                         <div className="h-full flex-1" style={{ backgroundColor: color }} />
-                        <div className="h-full w-24 bg-zinc-100 dark:bg-white/5" />
+                        <div className="h-full w-24 bg-brand-border/30 dark:bg-white/5" />
                       </div>
 
                       <div className="p-6 flex-1 flex flex-col">
@@ -2176,7 +2442,7 @@ function InventoryDashboardView({
                                 #{r.cod}
                               </span>
                             </div>
-                            <h4 className="text-[14px] font-bold text-brand-text-primary leading-snug line-clamp-2 h-[40px] group-hover:text-brand-purple transition-colors">
+                            <h4 className="text-[14px] font-bold text-brand-text-primary leading-snug break-words h-auto group-hover:text-brand-purple transition-colors select-all" title={r.desc}>
                               {r.desc}
                             </h4>
                           </div>
@@ -2192,7 +2458,7 @@ function InventoryDashboardView({
                         </div>
 
                         <div className="grid grid-cols-2 gap-3 mb-6">
-                          <div className="p-3 rounded-2xl bg-zinc-50 dark:bg-white/5 border border-brand-border/50 flex flex-col relative overflow-hidden group/item">
+                          <div className="p-3 rounded-2xl bg-brand-bg/50 dark:bg-black/40 border border-brand-border/30 dark:border-white/5 flex flex-col relative overflow-hidden group/item">
                             <div className="absolute top-0 right-0 w-8 h-8 bg-brand-text-secondary/5 -mr-4 -mt-4 rounded-full group-hover/item:scale-150 transition-transform" />
                             <span className="text-[8px] font-bold text-brand-text-secondary uppercase tracking-widest mb-1.5 opacity-60">Saldo Atual</span>
                             <div className="flex items-baseline gap-1 relative z-10">
@@ -2202,7 +2468,7 @@ function InventoryDashboardView({
                               <span className="text-[9px] font-medium text-brand-text-secondary uppercase font-mono opacity-40">{r.un}</span>
                             </div>
                           </div>
-                          <div className="p-3 rounded-2xl bg-brand-purple/5 border border-brand-purple/10 flex flex-col relative overflow-hidden group/item">
+                          <div className="p-3 rounded-2xl bg-brand-purple/5 border border-brand-purple/10 dark:border-brand-purple/20 flex flex-col relative overflow-hidden group/item">
                             <div className="absolute top-0 right-0 w-8 h-8 bg-brand-purple/5 -mr-4 -mt-4 rounded-full group-hover/item:scale-150 transition-transform" />
                             <span className="text-[8px] font-bold text-brand-purple uppercase tracking-widest mb-1.5 opacity-70">Sugestão AI</span>
                             <div className="relative z-10">
@@ -2213,7 +2479,7 @@ function InventoryDashboardView({
                           </div>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-4 pt-4 border-t border-brand-border/50">
+                        <div className="grid grid-cols-2 gap-4 pt-4 border-t border-brand-border dark:border-white/5">
                           <div className="flex flex-col">
                              <span className="text-[8px] font-bold text-brand-text-secondary uppercase opacity-50 tracking-widest mb-1">Demanda 4M (Proj)</span>
                              <div className="flex items-center gap-2">
@@ -2232,14 +2498,14 @@ function InventoryDashboardView({
 
                         {/* Transfer Options Pill List */}
                         {(transferableMap[r.cod] || []).filter(opt => opt.filial !== r.filial.split(' - ')[0] && opt.saldo > 0).length > 0 && (
-                          <div className="mt-6 pt-4 border-t border-brand-border/50">
+                          <div className="mt-6 pt-4 border-t border-brand-border dark:border-white/5">
                             <span className="text-[8px] font-bold text-brand-text-secondary uppercase tracking-[0.2em] mb-2 block opacity-50">Transferência Recomendada:</span>
                             <div className="flex flex-wrap gap-1.5">
                               {(transferableMap[r.cod] || [])
                                 .filter(opt => opt.filial !== r.filial.split(' - ')[0] && opt.saldo > 0)
                                 .slice(0, 3)
                                 .map((opt, i) => (
-                                  <div key={i} className={`px-2 py-1 text-[7px] font-black rounded-lg border flex items-center gap-1.5 ${opt.total_mov === 0 ? 'bg-brand-green/10 text-brand-green border-brand-green/20' : 'bg-brand-blue/5 text-brand-blue border-brand-blue/10'}`}>
+                                  <div key={i} className={`px-2 py-1 text-[7px] font-black rounded-lg border flex items-center gap-1.5 ${opt.total_mov === 0 ? 'bg-brand-green/10 text-brand-green border border-brand-green/20' : 'bg-brand-blue/5 text-brand-blue border border-brand-blue/10 dark:border-brand-blue/20'}`}>
                                     <MapPin className="w-2.5 h-2.5 opacity-50" />
                                     {cleanFilialName(opt.filial)} {opt.total_mov === 0 && <span className="text-[6px] px-1 bg-brand-green text-white rounded">SEM GIRO</span>}
                                   </div>
@@ -2250,12 +2516,12 @@ function InventoryDashboardView({
                       </div>
 
                       {/* Footer Actions */}
-                      <div className="px-6 py-4 bg-zinc-50 dark:bg-black/20 border-t border-brand-border/50 flex items-center justify-between gap-4 mt-auto" onClick={e => e.stopPropagation()}>
+                      <div className="px-6 py-4 bg-brand-bg/30 dark:bg-black/20 border-t border-brand-border dark:border-white/5 flex items-center justify-between gap-4 mt-auto" onClick={e => e.stopPropagation()}>
                         <div className="flex flex-col gap-1">
                           <span className="text-[8px] font-bold text-brand-text-secondary uppercase tracking-widest opacity-60">Qtd.</span>
                           <input 
                             type="number"
-                            className="w-[84px] bg-zinc-50 dark:bg-zinc-800 border-2 border-brand-border rounded-xl px-3 py-1.5 text-[12px] font-black text-brand-purple dark:text-white focus:border-brand-purple outline-none transition-all shadow-sm"
+                            className="w-[84px] bg-brand-bg/50 dark:bg-black/40 border border-brand-border dark:border-white/5 rounded-xl px-3 py-1.5 text-[12px] font-black text-brand-purple dark:text-white focus:border-brand-purple outline-none transition-all shadow-sm"
                             value={desiredQtys[`${r.cod}-${r.filial}`] ?? r.suggestedPurchase}
                             onChange={(e) => setDesiredQtys({
                               ...desiredQtys,
@@ -2324,7 +2590,7 @@ function InventoryDashboardView({
                         >
                           <td className="px-6 py-4 font-mono font-black text-[10px] text-brand-purple opacity-80">#{r.cod}</td>
                           <td className="px-4 py-4">
-                            <div className="text-[13px] font-black text-brand-text-primary truncate max-w-[320px] group-hover:text-brand-purple transition-colors">{r.desc}</div>
+                            <div className="text-[13px] font-black text-brand-text-primary break-words max-w-[320px] group-hover:text-brand-purple transition-colors select-all" title={r.desc}>{r.desc}</div>
                             <div className="text-[9px] uppercase font-bold text-brand-text-secondary mt-0.5 opacity-60 tracking-widest">{r.curva} • {r.grupo}</div>
                           </td>
                           {filters.criterio === 'TRANSFERENCIA' ? (
@@ -2349,7 +2615,7 @@ function InventoryDashboardView({
                               <td className="px-4 py-4 text-center" onClick={(e) => e.stopPropagation()}>
                                 <input 
                                   type="number"
-                                  className="w-16 bg-zinc-100 dark:bg-zinc-800 border-2 border-brand-border rounded-lg px-2 py-1 text-[11px] font-black text-center text-brand-text-primary dark:text-white focus:border-brand-blue outline-none shadow-inner"
+                                  className="w-16 bg-brand-bg/50 dark:bg-black/40 border border-brand-border dark:border-white/5 rounded-xl px-2 py-1 text-[11px] font-black text-center text-brand-text-primary dark:text-white focus:border-brand-blue outline-none transition-all shadow-inner"
                                   value={desiredQtys[`${r.cod}-${r.filial}`] ?? r.recommendedTransferQty}
                                   onChange={(e) => setDesiredQtys({
                                     ...desiredQtys,
@@ -2389,7 +2655,7 @@ function InventoryDashboardView({
                               <td className="px-4 py-4 text-center" onClick={(e) => e.stopPropagation()}>
                                 <input 
                                   type="number"
-                                  className="w-16 bg-zinc-100 dark:bg-zinc-800 border-2 border-brand-border rounded-lg px-2 py-1 text-[11px] font-black text-center text-brand-text-primary dark:text-white focus:border-brand-blue outline-none shadow-inner"
+                                  className="w-16 bg-brand-bg/50 dark:bg-black/40 border border-brand-border dark:border-white/5 rounded-xl px-2 py-1 text-[11px] font-black text-center text-brand-text-primary dark:text-white focus:border-brand-blue outline-none transition-all shadow-inner"
                                   value={desiredQtys[`${r.cod}-${r.filial}`] ?? r.suggestedPurchase}
                                   onChange={(e) => setDesiredQtys({
                                     ...desiredQtys,
@@ -2992,12 +3258,12 @@ function InventoryDashboardView({
                         transition={{ delay: (idx % 12) * 0.02 }}
                         key={`${r.cod}-${r.filial}-${idx}`} 
                         onClick={() => setSelectedItem(r)}
-                        className="group relative bg-white dark:bg-zinc-900 border border-brand-border/50 rounded-3xl overflow-hidden hover:border-brand-blue/30 transition-all cursor-pointer shadow-[0_4px_20px_rgba(0,0,0,0.03)] dark:shadow-none hover:shadow-2xl hover:shadow-brand-blue/5 flex flex-col h-full"
+                        className="group relative bg-brand-card dark:bg-brand-card/30 border border-brand-border dark:border-white/5 rounded-[2rem] overflow-hidden hover:border-brand-blue/40 dark:hover:border-brand-blue/30 transition-all duration-300 cursor-pointer shadow-md hover:shadow-2xl hover:shadow-brand-blue/10 dark:hover:shadow-brand-blue/5 hover:scale-[1.01] flex flex-col h-full"
                       >
                         {/* Status Bar at the top */}
                         <div className="h-1.5 w-full flex">
                           <div className="h-full flex-1" style={{ backgroundColor: color }} />
-                          <div className="h-full w-24 bg-zinc-100 dark:bg-white/5" />
+                          <div className="h-full w-24 bg-brand-border/30 dark:bg-white/5" />
                         </div>
 
                         <div className="p-6 flex-1 flex flex-col">
@@ -3007,7 +3273,7 @@ function InventoryDashboardView({
                                 <span className={`px-2 py-0.5 rounded-lg font-black text-[9px] tracking-widest transition-all ${
                                   r.curva === 'A' ? 'bg-brand-purple/10 text-brand-purple border border-brand-purple/20' :
                                   r.curva === 'B' ? 'bg-brand-blue/10 text-brand-blue border border-brand-blue/20' :
-                                  'bg-zinc-100 dark:bg-white/5 text-brand-text-secondary border border-brand-border/50'
+                                  'bg-brand-bg/40 dark:bg-white/5 text-brand-text-secondary border border-brand-border/50'
                                 }`}>
                                   CURVA {r.curva}
                                 </span>
@@ -3015,7 +3281,7 @@ function InventoryDashboardView({
                                   #{r.cod}
                                 </span>
                               </div>
-                              <h4 className="text-[14px] font-bold text-brand-text-primary leading-snug line-clamp-2 h-[40px] group-hover:text-brand-blue transition-colors">
+                              <h4 className="text-[14px] font-bold text-brand-text-primary leading-snug break-words h-auto group-hover:text-brand-blue transition-colors select-all" title={r.desc}>
                                 {r.desc}
                               </h4>
                             </div>
@@ -3031,7 +3297,7 @@ function InventoryDashboardView({
                           </div>
 
                           <div className="grid grid-cols-2 gap-3 mb-6">
-                            <div className="p-3 rounded-2xl bg-zinc-50 dark:bg-white/5 border border-brand-border/50 flex flex-col relative overflow-hidden group/item">
+                            <div className="p-3 rounded-2xl bg-brand-bg/50 dark:bg-black/40 border border-brand-border/30 dark:border-white/5 flex flex-col relative overflow-hidden group/item">
                               <div className="absolute top-0 right-0 w-8 h-8 bg-brand-text-secondary/5 -mr-4 -mt-4 rounded-full group-hover/item:scale-150 transition-transform" />
                               <span className="text-[8px] font-bold text-brand-text-secondary uppercase tracking-widest mb-1.5 opacity-60">Saldo Atual</span>
                               <div className="flex items-baseline gap-1 relative z-10">
@@ -3041,7 +3307,7 @@ function InventoryDashboardView({
                                 <span className="text-[9px] font-medium text-brand-text-secondary uppercase font-mono opacity-40">{r.un}</span>
                               </div>
                             </div>
-                            <div className="p-3 rounded-2xl bg-zinc-50 dark:bg-white/5 border border-brand-border/50 flex flex-col relative overflow-hidden group/item">
+                            <div className="p-3 rounded-2xl bg-brand-bg/50 dark:bg-black/40 border border-brand-border/30 dark:border-white/5 flex flex-col relative overflow-hidden group/item">
                               <div className="absolute top-0 right-0 w-8 h-8 bg-brand-blue/5 -mr-4 -mt-4 rounded-full group-hover/item:scale-150 transition-transform" />
                               <span className="text-[8px] font-bold text-brand-text-secondary uppercase tracking-widest mb-1.5 opacity-60">Movim. 12M</span>
                               <div className="flex items-baseline gap-1 relative z-10">
@@ -3067,7 +3333,7 @@ function InventoryDashboardView({
                               </div>
                             )}
                             {isDeadStock && (
-                              <div className="flex items-center gap-1.5 bg-zinc-100 dark:bg-white/5 text-brand-text-secondary text-[8px] font-black px-2.5 py-1 rounded-lg uppercase border border-brand-border/50">
+                              <div className="flex items-center gap-1.5 bg-brand-bg/40 dark:bg-black/40 text-brand-text-secondary text-[8px] font-black px-2.5 py-1 rounded-lg uppercase border border-brand-border/30 dark:border-white/5">
                                 <Ghost className="w-3 h-3" /> Estoque Parado
                               </div>
                             )}
@@ -3099,8 +3365,8 @@ function InventoryDashboardView({
                                           isSelected 
                                             ? 'bg-brand-green text-white border-brand-green shadow-md shadow-brand-green/20' 
                                             : opt.total_mov === 0 
-                                              ? 'bg-brand-green/5 text-brand-green border-brand-green/10 hover:bg-brand-green hover:text-white' 
-                                              : 'bg-zinc-100 dark:bg-white/5 text-brand-text-primary border-brand-border hover:border-brand-blue hover:text-brand-blue'
+                                              ? 'bg-brand-green/5 text-brand-green border border-brand-green/10 dark:border-brand-green/20 hover:bg-brand-green hover:text-white' 
+                                              : 'bg-brand-bg/40 dark:bg-black/40 text-brand-text-primary border border-brand-border dark:border-white/5 hover:border-brand-blue hover:text-brand-blue'
                                         }`}
                                       >
                                         <span className="tracking-tight">{opt.filial}</span>
@@ -3114,13 +3380,13 @@ function InventoryDashboardView({
                         </div>
 
                         {/* Action Footer */}
-                        <div className="px-6 py-4 bg-zinc-50 dark:bg-black/20 border-t border-brand-border/50 flex items-center justify-between gap-4 mt-auto" onClick={e => e.stopPropagation()}>
+                        <div className="px-6 py-4 bg-brand-bg/30 dark:bg-black/20 border-t border-brand-border dark:border-white/5 flex items-center justify-between gap-4 mt-auto" onClick={e => e.stopPropagation()}>
                           <div className="flex flex-col gap-1">
                             <span className="text-[8px] font-bold text-brand-text-secondary uppercase tracking-widest opacity-60">Qtd.</span>
                             <div className="relative group/input">
                               <input 
                                 type="number"
-                                className="w-[84px] bg-zinc-50 dark:bg-zinc-800 border-2 border-brand-border rounded-xl px-3 py-1.5 text-[12px] font-black text-brand-text-primary dark:text-white focus:border-brand-blue outline-none transition-all shadow-sm"
+                                className="w-[84px] bg-brand-bg/50 dark:bg-black/40 border border-brand-border dark:border-white/5 rounded-xl px-3 py-1.5 text-[12px] font-black text-brand-text-primary dark:text-white focus:border-brand-blue outline-none transition-all shadow-sm"
                                 value={desiredQtys[`${r.cod}-${r.filial}`] ?? r.suggestedPurchase}
                                 onChange={(e) => setDesiredQtys({
                                   ...desiredQtys,
@@ -3206,7 +3472,7 @@ function InventoryDashboardView({
                                   <div className="text-[10px] font-black text-brand-blue font-mono">#{r.cod}</div>
                                 </td>
                                 <td className="px-6 py-3">
-                                  <div className="text-[11px] font-black text-brand-text-primary group-hover:text-brand-blue transition-colors line-clamp-1 truncate max-w-[250px]">{r.desc}</div>
+                                  <div className="text-[11px] font-black text-brand-text-primary group-hover:text-brand-blue transition-colors break-words select-all" title={r.desc}>{r.desc}</div>
                                 </td>
                                 {filters.criterio === 'TRANSFERENCIA' ? (
                                   <>
@@ -3238,7 +3504,7 @@ function InventoryDashboardView({
                                     <td className="px-4 py-3 text-center" onClick={(e) => e.stopPropagation()}>
                                       <input 
                                         type="number"
-                                        className="w-16 bg-zinc-100 dark:bg-zinc-800 border-2 border-brand-border rounded-lg px-2 py-1 text-[11px] font-black text-center text-brand-text-primary dark:text-white focus:border-brand-blue outline-none shadow-inner"
+                                        className="w-16 bg-brand-bg/50 dark:bg-black/40 border border-brand-border dark:border-white/5 rounded-xl px-2 py-1 text-[11px] font-black text-center text-brand-text-primary dark:text-white focus:border-brand-blue outline-none transition-all shadow-inner"
                                         value={desiredQtys[`${r.cod}-${r.filial}`] ?? r.recommendedTransferQty}
                                         onChange={(e) => setDesiredQtys({
                                           ...desiredQtys,
@@ -3286,7 +3552,7 @@ function InventoryDashboardView({
                                     <td className="px-4 py-3 text-center" onClick={(e) => e.stopPropagation()}>
                                       <input 
                                         type="number"
-                                        className="w-16 bg-zinc-100 dark:bg-zinc-800 border-2 border-brand-border rounded-lg px-2 py-1 text-[11px] font-black text-center text-brand-text-primary dark:text-white focus:border-brand-blue outline-none shadow-inner"
+                                        className="w-16 bg-brand-bg/50 dark:bg-black/40 border border-brand-border dark:border-white/5 rounded-xl px-2 py-1 text-[11px] font-black text-center text-brand-text-primary dark:text-white focus:border-brand-blue outline-none transition-all shadow-inner"
                                         value={desiredQtys[`${r.cod}-${r.filial}`] ?? r.suggestedPurchase}
                                         onChange={(e) => setDesiredQtys({
                                           ...desiredQtys,
@@ -3389,6 +3655,7 @@ function InventoryDashboardView({
             data={data}
             onClose={() => setSelectedItem(null)}
             theme={theme}
+            selectedFiliais={selectedFiliais}
           />
         )}
         {separationModal?.isOpen && (
@@ -3564,10 +3831,10 @@ function FinanceDashboardView({
 }) {
   const [activeTab, setActiveTab] = useState<'evolution' | 'distribution' | 'partners'>('evolution');
   const chartColors = useMemo(() => ({
-    grid: theme === 'dark' ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.08)",
-    text: theme === 'dark' ? "#6B7280" : "#475569",
-    tooltipBg: theme === 'dark' ? "#0f1115" : "#ffffff",
-    tooltipText: theme === 'dark' ? "#ffffff" : "#0f172a"
+    grid: theme === 'dark' ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)",
+    text: theme === 'dark' ? "#9ca3af" : "#334155",
+    tooltipBg: theme === 'dark' ? "#1f2937" : "#ffffff",
+    tooltipText: theme === 'dark' ? "#f9fafb" : "#0f172a"
   }), [theme]);
 
   const kpis = [
@@ -3621,12 +3888,12 @@ function FinanceDashboardView({
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: idx * 0.05 }}
             key={kpi.label} 
-            className="bg-brand-card border-2 border-brand-border rounded-2xl p-6 relative overflow-hidden group hover:border-brand-blue/40 transition-all shadow-soft"
+            className="bg-brand-card dark:bg-brand-card/30 border border-brand-border dark:border-white/5 rounded-[2rem] p-6 relative overflow-hidden group hover:border-brand-blue/40 transition-all shadow-soft"
           >
             <div className={`absolute left-0 top-0 w-1 h-full ${kpi.bar} opacity-60 dark:opacity-40 group-hover:opacity-100 transition-opacity`} />
             <div className="flex justify-between items-start mb-4">
               <span className={`text-[9px] font-black uppercase tracking-[0.3em] font-mono leading-none ${kpi.color} opacity-80 dark:opacity-70`}>{kpi.label}</span>
-              <div className={`p-2.5 rounded-lg ${kpi.bar}/10 border border-${kpi.bar.replace('bg-', '')}/20`}>
+              <div className={`p-2.5 rounded-lg ${kpi.bar}/10`}>
                 <kpi.icon className={`w-4 h-4 ${kpi.color}`} />
               </div>
             </div>
@@ -3675,7 +3942,7 @@ function FinanceDashboardView({
                   className={`px-6 py-4 rounded-xl border-2 transition-all cursor-pointer group flex items-center justify-center min-w-[140px] max-w-[200px] flex-1 min-h-[70px] relative overflow-hidden backdrop-blur-xl shadow-soft ${
                     isSelected 
                     ? 'bg-brand-purple shadow-[0_20px_40px_rgba(168,85,247,0.4)] border-brand-purple ring-2 ring-white/10' 
-                    : 'bg-brand-card dark:bg-white/5 border-brand-border dark:border-white/10 hover:border-brand-purple/50 hover:bg-brand-hover hover:shadow-md'
+                    : 'bg-brand-bg/40 dark:bg-white/5 border-brand-border dark:border-white/10 hover:border-brand-purple/50 hover:bg-brand-hover hover:shadow-md'
                   } ${!active ? 'opacity-30 grayscale' : 'opacity-100'}`}
                 >
                   <div className="relative z-10 text-center">
@@ -3697,7 +3964,7 @@ function FinanceDashboardView({
           </div>
         </div>
 
-      <div className="flex flex-wrap gap-2 mb-8 bg-white dark:bg-brand-card/30 p-2 rounded-3xl border border-brand-border/40 dark:border-brand-border/20 w-fit shadow-sm">
+      <div className="flex flex-wrap gap-2 mb-8 bg-brand-card dark:bg-brand-card/30 p-2 rounded-3xl border border-brand-border/40 dark:border-brand-border/20 w-fit shadow-sm">
         {[
           { id: 'evolution', label: 'Evolução Mensal', icon: BarChart3 },
           { id: 'distribution', label: 'Top Categorias', icon: Box },
@@ -3728,7 +3995,7 @@ function FinanceDashboardView({
             className="grid grid-cols-1 gap-8"
           >
             {/* Main Chart */}
-            <div className="bg-white dark:bg-brand-container border border-brand-border rounded-[3rem] p-6 lg:p-10 premium-shadow premium-glass relative overflow-hidden group">
+            <div className="bg-brand-card dark:bg-brand-container border border-brand-border dark:border-white/5 rounded-[3rem] p-6 lg:p-10 premium-shadow premium-glass relative overflow-hidden group">
               <div className="absolute top-0 right-0 w-[400px] h-[400px] bg-brand-blue/5 blur-[100px] -mr-32 -mt-32 opacity-20 pointer-events-none" />
               <div className="flex items-center justify-between mb-12 relative z-10">
                 <div className="space-y-1">
@@ -3805,7 +4072,7 @@ function FinanceDashboardView({
             className="grid grid-cols-1 gap-8"
           >
             {/* Top Categories List View */}
-            <div className="bg-white dark:bg-brand-container border border-brand-border rounded-[3rem] p-6 lg:p-10 premium-shadow premium-glass relative overflow-hidden">
+            <div className="bg-brand-card dark:bg-brand-container border border-brand-border dark:border-white/5 rounded-[3rem] p-6 lg:p-10 premium-shadow premium-glass relative overflow-hidden">
               <div className="absolute top-0 right-0 w-[400px] h-[400px] bg-brand-purple/5 blur-[100px] -mr-32 -mt-32 opacity-20 pointer-events-none" />
               
               <div className="flex items-center justify-between mb-12 relative z-10">
@@ -3821,11 +4088,11 @@ function FinanceDashboardView({
                 </div>
               </div>
 
-              <div className="relative z-10 overflow-hidden border border-brand-border rounded-2xl bg-white dark:bg-brand-card/20 backdrop-blur-sm shadow-sm">
+              <div className="relative z-10 overflow-hidden border border-brand-border dark:border-white/5 rounded-2xl bg-brand-bg/30 dark:bg-brand-card/20 backdrop-blur-sm shadow-sm">
                  <div className="overflow-x-auto">
                     <table className="w-full text-left border-collapse">
                        <thead>
-                          <tr className="bg-gray-50 dark:bg-brand-card/40 border-b border-brand-border">
+                          <tr className="bg-brand-bg/50 dark:bg-brand-card/40 border-b border-brand-border dark:border-white/5">
                              <th className="px-6 py-5 text-[9px] font-black uppercase tracking-[0.2em] text-brand-text-secondary font-mono w-20">RANK</th>
                              <th className="px-6 py-5 text-[9px] font-black uppercase tracking-[0.2em] text-brand-text-secondary font-mono uppercase truncate">NOME DA CATEGORIA ERP</th>
                              <th className="px-6 py-5 text-[9px] font-black uppercase tracking-[0.2em] text-brand-text-secondary font-mono text-right whitespace-nowrap">VOLUME TOTAL</th>
@@ -3904,7 +4171,7 @@ function FinanceDashboardView({
             className="grid grid-cols-1 gap-8"
           >
             {/* Ranking / Concentration List View */}
-            <div className="bg-white dark:bg-brand-container border border-brand-border rounded-[3rem] p-6 lg:p-10 premium-shadow premium-glass relative overflow-hidden">
+            <div className="bg-brand-card dark:bg-brand-container border border-brand-border dark:border-white/5 rounded-[3rem] p-6 lg:p-10 premium-shadow premium-glass relative overflow-hidden">
               <div className="absolute top-0 right-0 w-[400px] h-[400px] bg-brand-green/5 blur-[100px] -mr-32 -mt-32 opacity-20 pointer-events-none" />
               
               <div className="flex items-center justify-between mb-12 relative z-10">
@@ -3921,11 +4188,11 @@ function FinanceDashboardView({
                 </div>
               </div>
 
-              <div className="relative z-10 overflow-hidden border border-brand-border rounded-2xl bg-white dark:bg-brand-card/20 backdrop-blur-sm shadow-sm">
+              <div className="relative z-10 overflow-hidden border border-brand-border dark:border-white/5 rounded-2xl bg-brand-bg/30 dark:bg-brand-card/20 backdrop-blur-sm shadow-sm">
                  <div className="overflow-x-auto">
                     <table className="w-full text-left border-collapse">
                        <thead>
-                          <tr className="bg-gray-50 dark:bg-brand-card/40 border-b border-brand-border">
+                          <tr className="bg-brand-bg/50 dark:bg-brand-card/40 border-b border-brand-border dark:border-white/5">
                              <th className="px-6 py-5 text-[9px] font-black uppercase tracking-[0.2em] text-brand-text-secondary font-mono w-20">RANK</th>
                              <th className="px-6 py-5 text-[9px] font-black uppercase tracking-[0.2em] text-brand-text-secondary font-mono uppercase truncate">NOME DO {dashboardConfig.partnersLabel}</th>
                              <th className="px-6 py-5 text-[9px] font-black uppercase tracking-[0.2em] text-brand-text-secondary font-mono text-right whitespace-nowrap">VOLUME TOTAL</th>
@@ -4152,6 +4419,9 @@ function Dashboard() {
 
   const [filterCriterio, setFilterCriterio] = useState<string>('');
   const [filterABC, setFilterABC] = useState<string>('');
+  const [filterAno, setFilterAno] = useState<string>(() => {
+    return localStorage.getItem('cortex-filterAno') || '';
+  });
 
   useEffect(() => {
     localStorage.setItem('cortex-filterCriterio', filterCriterio);
@@ -4160,6 +4430,10 @@ function Dashboard() {
   useEffect(() => {
     localStorage.setItem('cortex-filterABC', filterABC);
   }, [filterABC]);
+
+  useEffect(() => {
+    localStorage.setItem('cortex-filterAno', filterAno);
+  }, [filterAno]);
 
   // Clean all filters, searches, and branches when returning to the spreadsheet selection page
   useEffect(() => {
@@ -4172,6 +4446,7 @@ function Dashboard() {
       if (debouncedSearchTerm !== '') setDebouncedSearchTerm('');
       if (filterCriterio !== '') setFilterCriterio('');
       if (filterABC !== '') setFilterABC('');
+      if (filterAno !== '') setFilterAno('');
       if (selectedFiliais.length > 0) setSelectedFiliais([]);
       
       localStorage.removeItem('cortex-filterGroup');
@@ -4180,6 +4455,7 @@ function Dashboard() {
       localStorage.removeItem('cortex-searchTerm');
       localStorage.removeItem('cortex-filterCriterio');
       localStorage.removeItem('cortex-filterABC');
+      localStorage.removeItem('cortex-filterAno');
     }
   }, [screen]);
 
@@ -4623,7 +4899,16 @@ function Dashboard() {
   const transferableMap = useMemo(() => {
     if (!data?.inventoryRecords) return {};
     const map: Record<string, { filial: string, saldo: number, total_mov: number }[]> = {};
-    for (const r of data.inventoryRecords) {
+    for (const rOriginal of data.inventoryRecords) {
+      let r = { ...rOriginal };
+      if (filterAno && r.mesesByYear && r.mesesByYear[parseInt(filterAno, 10)]) {
+        const yearInt = parseInt(filterAno, 10);
+        const meses = r.mesesByYear[yearInt];
+        const total_mov = meses.reduce((a: number, b: number) => a + b, 0);
+        r.total_mov = total_mov;
+        r.saldoTransferivel = Math.max(0, r.saldo - total_mov);
+      }
+      
       if (r.saldoTransferivel > 0) {
         if (!map[r.cod]) map[r.cod] = [];
         map[r.cod].push({ 
@@ -4644,7 +4929,7 @@ function Dashboard() {
     });
 
     return map;
-  }, [data?.inventoryRecords]);
+  }, [data?.inventoryRecords, filterAno]);
 
   const staticInventoryFilters = useMemo(() => {
     if (!data?.inventoryRecords) return { groups: [], fabs: [], filiais: [] };
@@ -4676,7 +4961,22 @@ function Dashboard() {
   const enrichedInventoryRecords = useMemo(() => {
     if (!data?.inventoryRecords) return [];
     
-    return data.inventoryRecords.map((r: any) => {
+    return data.inventoryRecords.map((rOriginal: any) => {
+      let r = { ...rOriginal };
+      if (filterAno && r.mesesByYear && r.mesesByYear[parseInt(filterAno, 10)]) {
+        const yearInt = parseInt(filterAno, 10);
+        r.meses = r.mesesByYear[yearInt];
+        r.total_mov = r.meses.reduce((a: number, b: number) => a + b, 0);
+        r.media = r.total_mov / 12;
+        r.t1 = r.meses.slice(0, 3).reduce((a: number, b: number) => a + b, 0);
+        r.t2 = r.meses.slice(3, 6).reduce((a: number, b: number) => a + b, 0);
+        r.t3 = r.meses.slice(6, 9).reduce((a: number, b: number) => a + b, 0);
+        r.t4 = r.meses.slice(9, 12).reduce((a: number, b: number) => a + b, 0);
+        r.cobertura = r.media > 0 ? r.saldo / r.media : (r.saldo > 0 ? 99 : 0);
+        r.sugestao = Math.max(0, (r.media * 2) - r.saldo);
+        r.saldoTransferivel = Math.max(0, r.saldo - r.total_mov);
+      }
+
       // Exclude items with no stock and no movement from intelligence
       if (r.saldo <= 0 && r.total_mov === 0) return null;
 
@@ -4792,7 +5092,7 @@ function Dashboard() {
         totalNetworkSurplus
       };
     }).filter(Boolean);
-  }, [data?.inventoryRecords, transferableMap, currentMonthIdx]);
+  }, [data?.inventoryRecords, transferableMap, currentMonthIdx, filterAno]);
 
   const filteredData = useMemo(() => {
     if (!data) return null;
@@ -4970,6 +5270,8 @@ function Dashboard() {
       };
     }
 
+    const availableYears = [...new Set((data.records || []).map(r => r.ano).filter(Boolean))].sort((a, b) => Number(b) - Number(a));
+
     const res = { total: 0, nfs: new Set(), partners: new Set(), totalVolume: 0, items: new Set(), partnerAgg: {} as any, groupAgg: {} as any, filialAgg: {} as any, monthly: Array.from({ length: 12 }, (_, i) => ({ name: MONTH_NAMES[i], value: 0 })) };
     (data.records || []).forEach(r => {
       const isBranchMatch = selectedFiliais.length === 0 || selectedFiliais.some(f => getBranchId(f) === getBranchId(r.filial));
@@ -4977,7 +5279,8 @@ function Dashboard() {
                     (!filterPartner || r.parceiro === filterPartner) && 
                     (!filterGroup || r.grupo === filterGroup) &&
                     (!filterFab || r.fab === filterFab) &&
-                    (!filterComprador || r.comprador === filterComprador);
+                    (!filterComprador || r.comprador === filterComprador) &&
+                    (!filterAno || String(r.ano) === filterAno);
       if (match) {
         res.total += r.total;
         res.nfs.add(`${r.nf}|${r.parceiro}`);
@@ -5021,9 +5324,10 @@ function Dashboard() {
       availablePartners,
       availableGroups,
       availableFabs,
-      availableCompradores
+      availableCompradores,
+      availableYears
     };
-  }, [data, appMode, filterPartner, filterGroup, filterFab, filterComprador, filterCriterio, filterABC, debouncedSearchTerm, selectedFiliais, staticInventoryFilters, transferableMap]);
+  }, [data, appMode, filterPartner, filterGroup, filterFab, filterComprador, filterCriterio, filterABC, filterAno, debouncedSearchTerm, selectedFiliais, staticInventoryFilters, transferableMap]);
 
   const shouldHideSidebar = true;
 
@@ -5081,7 +5385,7 @@ function Dashboard() {
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-8 w-full max-w-6xl px-4">
                 <DashboardOption 
                   onClick={() => { setAppMode('purchases'); setScreen('upload'); }}
-                  icon={<TrendingDown className="text-brand-blue w-8 h-8" />}
+                  icon={<TrendingDown className="text-brand-blue w-12 h-12" />}
                   label="FINANCEIRO"
                   title="Dashboard Compras"
                   description="Análise profunda de fornecedores, redução de custos e otimização do mix."
@@ -5093,7 +5397,7 @@ function Dashboard() {
                     setAppMode('missing_items'); 
                     setScreen('upload');
                   }}
-                  icon={<AlertCircle className="text-brand-yellow w-8 h-8" />}
+                  icon={<AlertCircle className="text-brand-yellow w-12 h-12" />}
                   label="LOGÍSTICA"
                   title="Produtos em Falta"
                   description="Monitoramento inteligente de ruptura, excesso e sugestão de compras automático."
@@ -5102,7 +5406,7 @@ function Dashboard() {
                 />
                 <DashboardOption 
                   onClick={() => { setAppMode('sales'); setScreen('upload'); }}
-                  icon={<TrendingUp className="text-brand-green w-8 h-8" />}
+                  icon={<TrendingUp className="text-brand-green w-12 h-12" />}
                   label="COMERCIAL"
                   title="Dashboard Vendas"
                   description="Gestão estratégica de faturamento, canais e performance de produtos."
@@ -5242,7 +5546,7 @@ function Dashboard() {
             key="dashboard"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            className="flex flex-col min-h-screen"
+            className="flex flex-col h-screen overflow-y-auto"
           >
             {loadingDrive && (
               <div className="fixed bottom-8 right-8 z-[200] bg-brand-blue text-white px-4 py-2 rounded-full text-[10px] font-black uppercase tracking-widest shadow-2xl flex items-center gap-2 animate-pulse border border-white/20">
@@ -5350,6 +5654,22 @@ function Dashboard() {
                       <PieChart className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-brand-text-secondary opacity-60 group-focus-within:text-brand-blue transition-colors" />
                     </div>
                     )}
+
+                    {(appMode === 'sales' || appMode === 'purchases' || appMode === 'missing_items') && (
+                    <div className="relative group">
+                      <select 
+                        className="bg-brand-card dark:bg-zinc-800 border-2 border-brand-border rounded-xl pl-8 pr-4 py-2.5 text-[10px] font-black uppercase tracking-wider outline-none transition-all appearance-none cursor-pointer focus:ring-4 focus:ring-brand-blue/10 w-[120px] text-brand-text-primary dark:text-white shadow-soft hover:border-brand-blue/40"
+                        value={filterAno}
+                        onChange={e => setFilterAno(e.target.value)}
+                      >
+                        <option value="" className="text-brand-text-primary dark:text-white">Ano: Todos</option>
+                        {(appMode === 'missing_items' ? (data?.availableYears || []) : (filteredData?.availableYears || [])).map((yr: string | number) => (
+                          <option key={yr} value={yr} className="text-brand-text-primary dark:text-white">{yr}</option>
+                        ))}
+                      </select>
+                      <Calendar className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-brand-text-secondary opacity-60 group-focus-within:text-brand-blue transition-colors" />
+                    </div>
+                    )}
                   </div>
 
                   <div className="h-8 w-px bg-white/10 mx-1 hidden xl:block" />
@@ -5358,7 +5678,7 @@ function Dashboard() {
                     <input 
                       type="text"
                       placeholder="Buscar código ou descrição..."
-                      className="bg-white dark:bg-zinc-800/50 border-2 border-brand-border rounded-xl px-10 py-2.5 text-[11px] font-black w-[280px] focus:w-[350px] focus:ring-4 focus:ring-brand-blue/10 focus:border-brand-blue/50 outline-none transition-all placeholder:text-brand-text-secondary/50 text-brand-text-primary dark:text-white shadow-soft hover:border-brand-blue/20"
+                      className="bg-brand-card dark:bg-zinc-800/50 border border-brand-border dark:border-white/5 rounded-xl px-10 py-2.5 text-[11px] font-black w-[280px] focus:w-[350px] focus:ring-4 focus:ring-brand-blue/10 focus:border-brand-blue/50 outline-none transition-all placeholder:text-brand-text-secondary/50 text-brand-text-primary dark:text-white shadow-soft hover:border-brand-blue/20"
                       value={searchTerm}
                       onChange={e => setSearchTerm(e.target.value)}
                     />
@@ -5375,17 +5695,25 @@ function Dashboard() {
 
                   <div className="h-8 w-px bg-brand-border mx-1 hidden lg:block" />
 
-                  <div className="flex bg-gray-100 dark:bg-black/20 border border-brand-border rounded-xl p-0.5 gap-0.5">
+                  <div className="flex bg-brand-card dark:bg-black/60 border border-brand-border dark:border-white/5 rounded-xl p-0.5 gap-0.5 shadow-inner">
                     <button
                       onClick={() => setTheme('light')}
-                      className={`p-2 rounded-lg transition-all flex items-center gap-2 text-[9px] font-black uppercase tracking-widest ${theme === 'light' ? 'bg-white text-brand-blue shadow-md' : 'text-brand-text-secondary opacity-40 hover:opacity-100'}`}
+                      className={`p-2 rounded-lg transition-all flex items-center gap-2 text-[9px] font-black uppercase tracking-widest shrink-0 ${
+                        theme === 'light' 
+                          ? 'bg-brand-blue text-white shadow-lg shadow-brand-blue/30 scale-[1.02] z-10' 
+                          : 'text-brand-text-secondary hover:text-brand-text-primary hover:bg-brand-hover dark:text-zinc-400 dark:hover:text-white dark:hover:bg-white/5'
+                      }`}
                     >
                       <Sun className="w-3.5 h-3.5" />
                       Claro
                     </button>
                     <button
                       onClick={() => setTheme('dark')}
-                      className={`p-2 rounded-lg transition-all flex items-center gap-2 text-[9px] font-black uppercase tracking-widest ${theme === 'dark' ? 'bg-brand-blue text-white shadow-md' : 'text-brand-text-secondary opacity-40 hover:opacity-100'}`}
+                      className={`p-2 rounded-lg transition-all flex items-center gap-2 text-[9px] font-black uppercase tracking-widest shrink-0 ${
+                        theme === 'dark' 
+                          ? 'bg-brand-blue text-white shadow-lg shadow-brand-blue/30 scale-[1.02] z-10' 
+                          : 'text-brand-text-secondary hover:text-brand-text-primary hover:bg-brand-hover dark:text-zinc-400 dark:hover:text-white dark:hover:bg-white/5'
+                      }`}
                     >
                       <Moon className="w-3.5 h-3.5" />
                       Escuro
@@ -5405,10 +5733,14 @@ function Dashboard() {
 
                   {/* Controle de Layout: Grid vs Table view */}
                   {appMode === 'missing_items' && (
-                    <div className="flex bg-gray-100 dark:bg-zinc-800/80 border border-brand-border rounded-xl p-0.5 gap-0.5 shadow-sm" title="Controle de Layout">
+                    <div className="flex bg-brand-card dark:bg-black/60 border border-brand-border dark:border-white/5 rounded-xl p-0.5 gap-0.5 shadow-inner" title="Controle de Layout">
                       <button
                         onClick={() => setViewType('table')}
-                        className={`p-2 rounded-lg transition-all flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest ${viewType === 'table' ? 'bg-brand-blue text-white shadow-md' : 'text-brand-text-secondary dark:text-zinc-400 opacity-60 hover:opacity-100'}`}
+                        className={`p-2 rounded-lg transition-all flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest shrink-0 ${
+                          viewType === 'table' 
+                            ? 'bg-brand-blue text-white shadow-lg shadow-brand-blue/30 scale-[1.02] z-10' 
+                            : 'text-brand-text-secondary hover:text-brand-text-primary hover:bg-brand-hover dark:text-zinc-400 dark:hover:text-white dark:hover:bg-white/5'
+                        }`}
                         title="Visualização em Lista/Tabela"
                       >
                         <TableProperties className="w-3.5 h-3.5" />
@@ -5416,7 +5748,11 @@ function Dashboard() {
                       </button>
                       <button
                         onClick={() => setViewType('grid')}
-                        className={`p-2 rounded-lg transition-all flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest ${viewType === 'grid' ? 'bg-brand-blue text-white shadow-md' : 'text-brand-text-secondary dark:text-zinc-400 opacity-60 hover:opacity-100'}`}
+                        className={`p-2 rounded-lg transition-all flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest shrink-0 ${
+                          viewType === 'grid' 
+                            ? 'bg-brand-blue text-white shadow-lg shadow-brand-blue/30 scale-[1.02] z-10' 
+                            : 'text-brand-text-secondary hover:text-brand-text-primary hover:bg-brand-hover dark:text-zinc-400 dark:hover:text-white dark:hover:bg-white/5'
+                        }`}
                         title="Visualização em Grade/Card"
                       >
                         <LayoutGrid className="w-3.5 h-3.5" />
@@ -5490,14 +5826,14 @@ function Dashboard() {
               )}
             </main>
 
-            <footer className="bg-brand-card border-t border-brand-border p-4 text-[10px] text-gray-600 font-mono">
+            <footer className="bg-brand-card border-t border-brand-border p-4 text-[10px] text-brand-text-secondary opacity-70 font-mono">
               <div className={`mx-auto flex items-center gap-4 ${shouldHideSidebar ? 'max-w-full' : 'max-w-[1600px]'}`}>
                 <div className="flex items-center gap-2">
                   <div className="w-1.5 h-1.5 bg-brand-green rounded-full shadow-[0_0_4px_#38e2a0]" />
                   <span>SISTEMA ATIVO</span>
                 </div>
                 <span>•</span>
-                <span className="text-gray-500 uppercase">Stack: React + Tailwind + Recharts + SheetJS</span>
+                <span className="uppercase">Stack: React + Tailwind + Recharts + SheetJS</span>
                 <span className="ml-auto">© 2024 AI STUDIO ANALYTICS</span>
               </div>
             </footer>
@@ -5656,7 +5992,7 @@ function PartnerDetailsModal({ partnerName, filialName, mode, records, onClose }
                 <div className={`absolute left-0 top-0 w-1 h-full ${s.bar} opacity-20 group-hover:opacity-60 transition-opacity`} />
                 <div className="flex items-center justify-between mb-4">
                   <span className="text-[8px] text-brand-text-secondary font-black uppercase tracking-[0.2em] font-mono opacity-60">{s.label}</span>
-                  <div className={`p-2 rounded-lg ${s.bar}/10 border border-${s.bar.replace('bg-', '')}/10`}>
+                  <div className={`p-2 rounded-lg ${s.bar}/10`}>
                     <s.icon className={`w-3.5 h-3.5 ${s.color}`} />
                   </div>
                 </div>
@@ -6065,31 +6401,45 @@ function AppContent() {
 }
 
 function DashboardOption({ onClick, icon, label, title, description, accent, subIcon }: { onClick: () => void, icon: React.ReactNode, label: string, title: string, description: string, accent: 'blue' | 'yellow' | 'green', subIcon: React.ReactNode }) {
-  const colors = {
-    blue: 'border-brand-blue/20 hover:border-brand-blue/50 ring-brand-blue/10 bg-brand-blue/5 text-brand-blue glow-blue',
-    yellow: 'border-brand-yellow/20 hover:border-brand-yellow/50 ring-brand-yellow/10 bg-brand-yellow/5 text-brand-yellow glow-yellow',
-    green: 'border-brand-green/20 hover:border-brand-green/50 ring-brand-green/10 bg-brand-green/5 text-brand-green glow-green'
+  const shadowGlow = {
+    blue: 'hover:border-brand-blue/40 hover:shadow-brand-blue/10 hover:shadow-2xl dark:hover:shadow-brand-blue/5',
+    yellow: 'hover:border-brand-yellow/40 hover:shadow-brand-yellow/10 hover:shadow-2xl dark:hover:shadow-brand-yellow/5',
+    green: 'hover:border-brand-green/40 hover:shadow-brand-green/10 hover:shadow-2xl dark:hover:shadow-brand-green/5'
+  };
+
+  const labelColors = {
+    blue: 'text-brand-blue/80 dark:text-brand-blue',
+    yellow: 'text-brand-yellow/80 dark:text-brand-yellow',
+    green: 'text-brand-green/80 dark:text-brand-green'
   };
 
   return (
     <button 
       onClick={onClick}
-      className={`group relative p-10 bg-brand-container border-2 rounded-[3.5rem] transition-all text-left overflow-hidden shadow-2xl premium-glass ${colors[accent]}`}
+      className={`group relative p-10 bg-brand-card dark:bg-brand-card/30 border border-brand-border dark:border-white/5 rounded-[2.5rem] transition-all text-left overflow-hidden shadow-lg hover:scale-[1.02] duration-300 ${shadowGlow[accent]}`}
     >
-      <div className="absolute top-0 right-0 p-8 opacity-0 group-hover:opacity-10 transition-all transform group-hover:scale-150 rotate-12 duration-700 pointer-events-none">
+      <div className={`absolute -right-4 -bottom-4 p-4 opacity-[0.03] dark:opacity-[0.06] transition-all transform group-hover:scale-125 group-hover:-translate-x-2 group-hover:-translate-y-2 duration-700 pointer-events-none ${
+        accent === 'blue' ? 'text-brand-blue' :
+        accent === 'yellow' ? 'text-brand-yellow' :
+        'text-brand-green'
+      }`}>
         {subIcon}
       </div>
-      <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-8 border transition-all duration-500 group-hover:scale-110 shadow-lg ${accent === 'blue' ? 'bg-brand-blue/10 border-brand-blue/20' : accent === 'yellow' ? 'bg-brand-yellow/10 border-brand-yellow/20' : 'bg-brand-green/10 border-brand-green/20'}`}>
+      <div className={`w-20 h-20 rounded-[1.5rem] flex items-center justify-center mb-8 border transition-all duration-500 group-hover:scale-110 shadow-sm ${
+        accent === 'blue' ? 'bg-brand-blue/10 border-brand-blue/20 text-brand-blue' :
+        accent === 'yellow' ? 'bg-brand-yellow/10 border-brand-yellow/20 text-brand-yellow' :
+        'bg-brand-green/10 border-brand-green/20 text-brand-green'
+      }`}>
         {icon}
       </div>
-      <div className={`text-[10px] font-black uppercase tracking-[0.4em] mb-4 font-mono opacity-60`}>{label}</div>
-      <h3 className="text-2xl font-black mb-3 text-black dark:text-white tracking-tight leading-tight group-hover:translate-x-1 transition-transform">
+      <div className={`text-[10px] font-black uppercase tracking-[0.4em] mb-4 font-mono ${labelColors[accent]}`}>{label}</div>
+      <h3 className="text-2xl font-black mb-3 text-brand-text-primary dark:text-white tracking-tight leading-tight group-hover:translate-x-1 transition-transform">
         {title}
       </h3>
-      <p className="text-[11px] text-brand-text-secondary leading-relaxed font-bold opacity-80 group-hover:opacity-100 transition-opacity">
+      <p className="text-[12px] text-brand-text-secondary leading-relaxed font-semibold opacity-90 group-hover:opacity-100 transition-opacity">
         {description}
       </p>
-      <div className="mt-10 flex items-center text-[10px] font-black uppercase tracking-[0.3em] gap-3 group-hover:gap-5 transition-all">
+      <div className={`mt-10 flex items-center text-[10px] font-black uppercase tracking-[0.3em] gap-3 group-hover:gap-5 transition-all ${labelColors[accent]}`}>
         INICIAR SESSÃO <ArrowRight className="w-4 h-4" />
       </div>
     </button>
