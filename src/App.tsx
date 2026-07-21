@@ -685,14 +685,22 @@ function ItemDetailModal({
   onClose,
   theme,
   selectedFiliais = [],
-  filterAno = ''
+  filterAno = '',
+  addToCart,
+  removeFromCart,
+  isItemInCart,
+  cartItems
 }: { 
   item: any, 
   data: DashboardData, 
   onClose: () => void,
   theme: 'light' | 'dark',
   selectedFiliais?: string[],
-  filterAno?: string
+  filterAno?: string,
+  addToCart: (item: any, qty: number, sourceFilial?: string, forcePurchase?: boolean, autoSplit?: boolean) => void,
+  removeFromCart: (key: string) => void,
+  isItemInCart: (cod: string, filial: string) => boolean,
+  cartItems: any
 }) {
   const networkOptions = useMemo(() => {
     const rawOptions = (data.inventoryRecords || [])
@@ -746,6 +754,7 @@ function ItemDetailModal({
   const [recommendation, setRecommendation] = useState<string>(item.recommendation || 'Gerando recomendação inteligente...');
   const [loadingAI, setLoadingAI] = useState(false);
   const [selectedBranch, setSelectedBranch] = useState<any>(null);
+  const [localQty, setLocalQty] = useState<number>(item.suggestedPurchase || 1);
 
   const selectedBranchesRecords = useMemo(() => {
     if (!selectedFiliais || selectedFiliais.length === 0) return [];
@@ -1166,9 +1175,48 @@ function ItemDetailModal({
           </AnimatePresence>
         </div>
 
-        <div className="px-8 py-4 border-t border-brand-border bg-black/[0.02] dark:bg-black/20 flex items-center justify-between">
-          <div className="flex items-center gap-2 opacity-50">
+        <div className="px-8 py-4 border-t border-brand-border bg-black/[0.02] dark:bg-black/20 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[8px] font-bold text-brand-text-secondary uppercase tracking-widest opacity-60">Qtd. Desejada</span>
+              <input 
+                type="number"
+                className="w-20 bg-white/50 dark:bg-black/40 border border-brand-border dark:border-white/5 rounded-xl px-2.5 py-1.5 text-xs font-black text-brand-text-primary dark:text-white focus:border-brand-blue outline-none transition-all shadow-sm"
+                value={localQty}
+                onChange={(e) => setLocalQty(Math.max(0, parseInt(e.target.value) || 0))}
+              />
+            </div>
+
+            {isItemInCart(item.cod, item.filial) ? (
+              <button 
+                onClick={() => {
+                  removeFromCart(`${item.cod}-${item.filial}`);
+                }}
+                className="px-6 h-[34px] bg-brand-red text-white rounded-xl text-[9px] font-black uppercase tracking-widest transition-all shadow-md hover:brightness-110 flex items-center gap-2"
+              >
+                <X className="w-3.5 h-3.5" /> Remover do Carrinho
+              </button>
+            ) : (
+              <button 
+                onClick={() => {
+                  if (selectedBranch) {
+                    // select item for transfer when filial is selected
+                    addToCart(item, localQty, selectedBranch.filial);
+                  } else {
+                    // add item to purchase when it is to be purchased
+                    addToCart(item, localQty, undefined, true);
+                  }
+                }}
+                className={`px-6 h-[34px] text-white rounded-xl text-[9px] font-black uppercase tracking-widest transition-all shadow-md hover:brightness-110 flex items-center gap-2 ${
+                  selectedBranch ? 'bg-brand-green' : 'bg-brand-blue'
+                }`}
+              >
+                <ShoppingCart className="w-3.5 h-3.5" />
+                {selectedBranch ? `Adicionar Transferência (${cleanFilialName(selectedBranch.filial)})` : 'Adicionar Compra'}
+              </button>
+            )}
           </div>
+
           <div className="flex gap-2">
             <button 
               onClick={onClose}
@@ -1191,52 +1239,94 @@ function ItemDetailModal({
 
 const CRIT_LABELS: Record<string, string> = {
   URGENTE: 'Ruptura',
+  RUPTURA: 'Ruptura',
   COMPRAR_JA: 'Crítico',
+  'REPOSIÇÃO': 'Reposição',
   COMPRAR_BREVE: 'Preventivo',
   OK: 'Saudável',
+  'SAUDÁVEL': 'Saudável',
   ESTOQUE_ALTO: 'Excesso',
+  EXCESSO: 'Excesso',
   SEM_MOVIMENTO: 'Sem Movimento',
+  SEM_DEMANDA: 'Sem Demanda',
   'CRÍTICO': 'Risco Crítico',
   'MÉDIO': 'Risco Médio',
   'BAIXO': 'Risco Baixo'
 };
 
-const CRIT_COLORS: Record<string, string> = {
-  URGENTE: '#ef4444',
-  COMPRAR_JA: '#f59e0b',
-  COMPRAR_BREVE: '#06b6d4',
-  OK: '#10b981',
-  ESTOQUE_ALTO: '#8b5cf6',
-  SEM_MOVIMENTO: '#94a3b8',
-  'CRÍTICO': '#f43f5e',
-  'MÉDIO': '#f59e0b',
-  'BAIXO': '#10b981'
+const CRIT_COLORS_LIGHT: Record<string, string> = {
+  URGENTE: '#b91c1c',       // Red 700 (High contrast)
+  RUPTURA: '#b91c1c',       // Red 700
+  COMPRAR_JA: '#b45309',     // Amber 700
+  'REPOSIÇÃO': '#b45309',    // Amber 700
+  COMPRAR_BREVE: '#0f766e',  // Teal 700
+  OK: '#15803d',             // Green 700
+  'SAUDÁVEL': '#15803d',     // Green 700
+  ESTOQUE_ALTO: '#6d28d9',   // Purple 700
+  EXCESSO: '#6d28d9',        // Purple 700
+  SEM_MOVIMENTO: '#475569',  // Slate 600
+  SEM_DEMANDA: '#64748b',    // Slate 500
+  'CRÍTICO': '#be123c',      // Rose 700
+  'MÉDIO': '#b45309',        // Amber 700
+  'BAIXO': '#15803d'         // Green 700
 };
+
+const CRIT_COLORS_DARK: Record<string, string> = {
+  URGENTE: '#f87171',       // Red 400
+  RUPTURA: '#f87171',       // Red 400
+  COMPRAR_JA: '#fbbf24',     // Amber 400
+  'REPOSIÇÃO': '#fbbf24',    // Amber 400
+  COMPRAR_BREVE: '#22d3ee',  // Cyan 400
+  OK: '#34d399',             // Emerald 400
+  'SAUDÁVEL': '#34d399',     // Emerald 400
+  ESTOQUE_ALTO: '#a78bfa',   // Purple 400
+  EXCESSO: '#a78bfa',        // Purple 400
+  SEM_MOVIMENTO: '#94a3b8',  // Slate 400
+  SEM_DEMANDA: '#94a3b8',    // Slate 400
+  'CRÍTICO': '#fb7185',      // Rose 400
+  'MÉDIO': '#fbbf24',        // Amber 400
+  'BAIXO': '#34d399'         // Emerald 400
+};
+
+// Standard fallback color map for any un-themed references
+const CRIT_COLORS = CRIT_COLORS_DARK;
 
 const CRIT_ICONS: Record<string, any> = {
   URGENTE: AlertCircle,
+  RUPTURA: AlertCircle,
   COMPRAR_JA: AlertTriangle,
+  'REPOSIÇÃO': AlertTriangle,
   COMPRAR_BREVE: Clock,
   OK: CheckCircle2,
+  'SAUDÁVEL': CheckCircle2,
   ESTOQUE_ALTO: TrendingUp,
+  EXCESSO: TrendingUp,
   SEM_MOVIMENTO: EyeOff,
+  SEM_DEMANDA: EyeOff,
   'CRÍTICO': AlertCircle,
   'MÉDIO': Activity,
   'BAIXO': CheckCircle2
 };
 
 function StatusPill({ status, theme }: { status: string, theme: 'light' | 'dark' }) {
-  const label = CRIT_LABELS[status] || status;
-  const color = CRIT_COLORS[status] || '#cbd5e1';
-  const Icon = CRIT_ICONS[status] || Activity;
+  const normStatus = (status || '').toUpperCase();
+  const label = CRIT_LABELS[normStatus] || status;
+  const isDark = theme === 'dark';
+  const colorMap = isDark ? CRIT_COLORS_DARK : CRIT_COLORS_LIGHT;
+  const color = colorMap[normStatus] || (isDark ? '#a1a1aa' : '#71717a');
+  const Icon = CRIT_ICONS[normStatus] || Activity;
+
+  // Background is slightly more solid in light mode to provide depth and beautiful visual hierarchy
+  const bgOpacity = isDark ? '15' : '12';
+  const borderOpacity = isDark ? '30' : '20';
 
   return (
     <span 
       className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-[0.1em] border shadow-sm transition-all hover:scale-105"
       style={{ 
-        backgroundColor: `${color}15`, 
+        backgroundColor: `${color}${bgOpacity}`, 
         color: color, 
-        borderColor: `${color}30`
+        borderColor: `${color}${borderOpacity}`
       }}
     >
       <div className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ backgroundColor: color }} />
@@ -1254,7 +1344,7 @@ function TransferStatusBadge({ label }: { label: string }) {
     <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[8px] font-black uppercase tracking-widest border transition-all hover:brightness-110 cursor-default ${
       isPartial 
         ? 'bg-brand-orange/10 text-brand-orange border-brand-orange/20 shadow-orange-500/5' 
-        : 'bg-brand-purple/10 text-brand-purple border-brand-purple/20 shadow-purple-500/5'
+        : 'bg-brand-green/10 text-brand-green border-brand-green/20 shadow-green-500/5'
     }`}>
       {isPartial ? <RefreshCcw className="w-2.5 h-2.5" /> : <ShieldCheck className="w-2.5 h-2.5" />}
       {label}
@@ -2902,7 +2992,7 @@ function InventoryDashboardView({
           <div className="p-8 space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <div className="max-w-4xl mx-auto">
               {/* CARD: COMPRA INTERNA */}
-              <div className="bg-brand-card border-2 border-brand-border rounded-[2.5rem] p-8 shadow-soft flex flex-col min-h-[600px] hover:shadow-xl transition-shadow">
+              <div className="bg-brand-card status-ruptura border-2 border-brand-red/20 dark:border-brand-red/10 rounded-[2.5rem] p-8 shadow-soft flex flex-col min-h-[600px] hover:shadow-xl hover:border-brand-red/30 hover:shadow-brand-red/5 transition-all duration-300">
                 <div className="flex justify-between items-start mb-8">
                   <div className="flex items-center gap-4">
                     <div className="w-12 h-12 bg-brand-red/10 rounded-2xl flex items-center justify-center border border-brand-red/20 shadow-lg glow-red">
@@ -2916,19 +3006,19 @@ function InventoryDashboardView({
                   <div className="flex items-center gap-2">
                     <button 
                       onClick={() => onExportExcel(purchaseItems, 'Compra')}
-                      className="flex items-center gap-2 px-3 py-2 bg-gray-100 dark:bg-black/20 hover:bg-brand-blue/10 rounded-xl text-[9px] font-black text-brand-text-secondary hover:text-brand-blue uppercase tracking-widest transition-all border border-brand-border/10"
+                      className="flex items-center gap-2 px-3 py-2 bg-black/[0.03] dark:bg-white/[0.04] hover:bg-brand-blue/10 rounded-xl text-[9px] font-black text-brand-text-secondary hover:text-brand-blue uppercase tracking-widest transition-all border border-brand-border/30 dark:border-white/10"
                     >
                       <FileSpreadsheet className="w-4 h-4" /> EXCEL
                     </button>
                     <button 
                       onClick={() => onExportPDF(purchaseItems, 'Compra')}
-                      className="flex items-center gap-2 px-3 py-2 bg-gray-100 dark:bg-black/20 hover:bg-brand-red/10 rounded-xl text-[9px] font-black text-brand-text-secondary hover:text-brand-red uppercase tracking-widest transition-all border border-brand-border/10"
+                      className="flex items-center gap-2 px-3 py-2 bg-black/[0.03] dark:bg-white/[0.04] hover:bg-brand-red/10 rounded-xl text-[9px] font-black text-brand-text-secondary hover:text-brand-red uppercase tracking-widest transition-all border border-brand-border/30 dark:border-white/10"
                     >
                       <FileText className="w-4 h-4" /> PDF
                     </button>
                     <button 
                       onClick={onPrint}
-                      className="flex items-center gap-2 px-3 py-2 bg-gray-100 dark:bg-black/20 hover:bg-brand-purple/10 rounded-xl text-[9px] font-black text-brand-text-secondary hover:text-brand-purple uppercase tracking-widest transition-all border border-brand-border/10"
+                      className="flex items-center gap-2 px-3 py-2 bg-black/[0.03] dark:bg-white/[0.04] hover:bg-brand-purple/10 rounded-xl text-[9px] font-black text-brand-text-secondary hover:text-brand-purple uppercase tracking-widest transition-all border border-brand-border/30 dark:border-white/10"
                     >
                       <Printer className="w-4 h-4" /> IMPRIMIR
                     </button>
@@ -2946,13 +3036,13 @@ function InventoryDashboardView({
                 <div className="flex-1 overflow-auto max-h-[600px] space-y-6 pr-2 custom-scrollbar">
                   {Object.keys(groupedPurchases).length === 0 ? (
                     <div className="h-[400px] flex flex-col items-center justify-center p-10 text-center opacity-40">
-                      <CheckCircle2 className="w-16 h-16 mb-4 text-brand-green animate-pulse" />
+                      <CheckCircle2 className="w-16 h-16 mb-4 text-brand-red animate-pulse" />
                       <p className="text-sm font-black uppercase tracking-widest">Nenhuma compra adicionada</p>
                       <p className="text-[10px] mt-2 max-w-[250px]">Adicione itens na aba operacional ou use a inteligência para reposição.</p>
                     </div>
                   ) : (
                     (Object.entries(groupedPurchases) as [string, any[]][]).map(([vendor, items]) => (
-                      <div key={vendor} className="bg-zinc-50/50 dark:bg-white/5 border border-brand-border/30 rounded-3xl overflow-hidden hover:border-brand-blue/30 transition-all shadow-sm">
+                      <div key={vendor} className="bg-brand-bg/50 dark:bg-black/40 border border-brand-border/30 dark:border-white/5 rounded-3xl overflow-hidden hover:border-brand-red/30 transition-all shadow-sm">
                         <div className="px-6 py-3 bg-brand-red/5 border-b border-brand-border/30 flex items-center justify-between">
                           <div className="flex items-center gap-3">
                             <div className="w-8 h-8 bg-brand-red/10 rounded-xl flex items-center justify-center border border-brand-red/20 shadow-sm">
@@ -2980,7 +3070,7 @@ function InventoryDashboardView({
                                 <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10 text-center">Ação</th>
                               </tr>
                             </thead>
-                            <tbody className="divide-y divide-brand-border/5">
+                            <tbody className="divide-y divide-brand-border/30 dark:divide-white/5">
                               {items.map((r: any, idx: number) => (
                                 <tr key={`${r.cod}-${r.filial}-${idx}`} className="hover:bg-brand-hover/40 transition-colors group">
                                   <td className="px-4 py-3">
@@ -3029,7 +3119,7 @@ function InventoryDashboardView({
           <div className="p-8 space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <div className="max-w-4xl mx-auto">
               {/* CARD: TRANSFERÊNCIA */}
-              <div className="bg-brand-card border-2 border-brand-border rounded-[2.5rem] p-8 shadow-soft flex flex-col min-h-[600px] hover:shadow-xl transition-shadow">
+              <div className="bg-brand-card status-saudavel border-2 border-brand-green/20 dark:border-brand-green/10 rounded-[2.5rem] p-8 shadow-soft flex flex-col min-h-[600px] hover:shadow-xl hover:border-brand-green/30 hover:shadow-brand-green/5 transition-all duration-300">
                 <div className="flex justify-between items-start mb-8">
                   <div className="flex items-center gap-4">
                     <div className="w-12 h-12 bg-brand-green/10 rounded-2xl flex items-center justify-center border border-brand-green/20 shadow-lg glow-green">
@@ -3043,19 +3133,19 @@ function InventoryDashboardView({
                   <div className="flex items-center gap-2">
                     <button 
                       onClick={() => onExportExcel(transferItems, 'Transferencia')}
-                      className="flex items-center gap-2 px-3 py-2 bg-gray-100 dark:bg-black/20 hover:bg-brand-blue/10 rounded-xl text-[9px] font-black text-brand-text-secondary hover:text-brand-blue uppercase tracking-widest transition-all border border-brand-border/10"
+                      className="flex items-center gap-2 px-3 py-2 bg-black/[0.03] dark:bg-white/[0.04] hover:bg-brand-blue/10 rounded-xl text-[9px] font-black text-brand-text-secondary hover:text-brand-blue uppercase tracking-widest transition-all border border-brand-border/30 dark:border-white/10"
                     >
                       <FileSpreadsheet className="w-4 h-4" /> EXCEL
                     </button>
                     <button 
                       onClick={() => onExportPDF(transferItems, 'Transferencia')}
-                      className="flex items-center gap-2 px-3 py-2 bg-gray-100 dark:bg-black/20 hover:bg-brand-red/10 rounded-xl text-[9px] font-black text-brand-text-secondary hover:text-brand-red uppercase tracking-widest transition-all border border-brand-border/10"
+                      className="flex items-center gap-2 px-3 py-2 bg-black/[0.03] dark:bg-white/[0.04] hover:bg-brand-red/10 rounded-xl text-[9px] font-black text-brand-text-secondary hover:text-brand-red uppercase tracking-widest transition-all border border-brand-border/30 dark:border-white/10"
                     >
                       <FileText className="w-4 h-4" /> PDF
                     </button>
                     <button 
                       onClick={onPrint}
-                      className="flex items-center gap-2 px-3 py-2 bg-gray-100 dark:bg-black/20 hover:bg-brand-purple/10 rounded-xl text-[9px] font-black text-brand-text-secondary hover:text-brand-purple uppercase tracking-widest transition-all border border-brand-border/10"
+                      className="flex items-center gap-2 px-3 py-2 bg-black/[0.03] dark:bg-white/[0.04] hover:bg-brand-purple/10 rounded-xl text-[9px] font-black text-brand-text-secondary hover:text-brand-purple uppercase tracking-widest transition-all border border-brand-border/30 dark:border-white/10"
                     >
                       <Printer className="w-4 h-4" /> IMPRIMIR
                     </button>
@@ -3073,17 +3163,17 @@ function InventoryDashboardView({
                 <div className="flex-1 overflow-auto max-h-[700px] space-y-6 pr-2 custom-scrollbar">
                   {Object.keys(groupedTransfers).length === 0 ? (
                     <div className="h-[400px] flex flex-col items-center justify-center p-10 text-center opacity-40">
-                      <Package className="w-16 h-16 mb-4 text-brand-blue animate-pulse" />
+                      <Package className="w-16 h-16 mb-4 text-brand-green animate-pulse" />
                       <p className="text-sm font-black uppercase tracking-widest">Nenhuma transferência vinculada</p>
                       <p className="text-[10px] mt-2 max-w-[250px]">Adicione itens na aba operacional ou use a automação inteligente.</p>
                     </div>
                   ) : (
                     (Object.entries(groupedTransfers) as [string, any[]][]).map(([destBranch, items]) => (
-                      <div key={destBranch} className="bg-zinc-50/50 dark:bg-white/5 border border-brand-border/30 rounded-3xl overflow-hidden hover:border-brand-blue/30 transition-all shadow-sm">
-                        <div className="px-6 py-4 bg-brand-blue/5 border-b border-brand-border/30 flex items-center justify-between">
+                      <div key={destBranch} className="bg-brand-bg/50 dark:bg-black/40 border border-brand-border/30 dark:border-white/5 rounded-3xl overflow-hidden hover:border-brand-green/30 transition-all shadow-sm">
+                        <div className="px-6 py-4 bg-brand-green/5 border-b border-brand-border/30 flex items-center justify-between">
                           <div className="flex items-center gap-3">
-                            <div className="w-8 h-8 bg-brand-blue/10 rounded-xl flex items-center justify-center border border-brand-blue/20">
-                              <MapPin className="w-4 h-4 text-brand-blue" />
+                            <div className="w-8 h-8 bg-brand-green/10 rounded-xl flex items-center justify-center border border-brand-green/20">
+                              <MapPin className="w-4 h-4 text-brand-green" />
                             </div>
                             <div>
                               <h4 className="text-[12px] font-black text-brand-text-primary uppercase tracking-tight">Destino: {destBranch}</h4>
@@ -3103,7 +3193,7 @@ function InventoryDashboardView({
                                 <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10 text-center">Ação</th>
                               </tr>
                             </thead>
-                            <tbody className="divide-y divide-brand-border/5">
+                            <tbody className="divide-y divide-brand-border/30 dark:divide-white/5">
                               {items.map((r: any, idx: number) => (
                                 <tr key={`${r.cod}-${r.filial}-${idx}`} className="hover:bg-brand-hover/40 transition-colors group">
                                   <td className="px-4 py-3">
@@ -3122,7 +3212,7 @@ function InventoryDashboardView({
                                     </button>
                                   </td>
                                   <td className="px-4 py-3 text-center">
-                                    <div className="text-[11px] font-black text-brand-blue">{r.desiredQty?.toLocaleString()}</div>
+                                    <div className="text-[11px] font-black text-brand-green">{r.desiredQty?.toLocaleString()}</div>
                                   </td>
                                   <td className="px-4 py-3 text-center">
                                     <button 
@@ -3138,9 +3228,9 @@ function InventoryDashboardView({
                           </table>
                         </div>
                         
-                        <div className="px-6 py-3 bg-zinc-100/50 dark:bg-black/20 flex justify-end">
+                        <div className="px-6 py-3 bg-black/[0.03] dark:bg-white/[0.02] border-t border-brand-border/30 dark:border-white/5 flex justify-end">
                             <button 
-                              className="px-4 py-1.5 bg-brand-purple text-white text-[9px] font-black rounded-xl uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-lg shadow-brand-purple/20 flex items-center gap-2"
+                              className="px-4 py-1.5 bg-brand-green text-white text-[9px] font-black rounded-xl uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-lg shadow-brand-green/20 flex items-center gap-2"
                               onClick={() => {
                                 setSeparationModal({ isOpen: true, destBranch, email: '', phone: '' });
                               }}
@@ -3583,7 +3673,13 @@ function InventoryDashboardView({
                           ) : (
                             <button 
                               className="flex-1 bg-brand-blue text-white h-10 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all flex items-center justify-center gap-2 shadow-lg shadow-brand-blue/20"
-                              onClick={() => addToCart(r, desiredQtys[`${r.cod}-${r.filial}`] ?? r.suggestedPurchase)}
+                              onClick={() => {
+                                if (filters.criterio === 'TRANSFERENCIA') {
+                                  addToCart(r, desiredQtys[`${r.cod}-${r.filial}`] ?? r.recommendedTransferQty, r.transferIdealFilial);
+                                } else {
+                                  addToCart(r, desiredQtys[`${r.cod}-${r.filial}`] ?? r.suggestedPurchase, undefined, true);
+                                }
+                              }}
                             >
                               <ShoppingCart className="w-4 h-4" /> Adicionar
                             </button>
@@ -3779,7 +3875,13 @@ function InventoryDashboardView({
                                     </button>
                                   ) : (
                                     <button 
-                                      onClick={() => addToCart(r, desiredQtys[`${r.cod}-${r.filial}`] ?? r.suggestedPurchase)}
+                                      onClick={() => {
+                                        if (filters.criterio === 'TRANSFERENCIA') {
+                                          addToCart(r, desiredQtys[`${r.cod}-${r.filial}`] ?? r.recommendedTransferQty, r.transferIdealFilial);
+                                        } else {
+                                          addToCart(r, desiredQtys[`${r.cod}-${r.filial}`] ?? r.suggestedPurchase, undefined, true);
+                                        }
+                                      }}
                                       className="p-1.5 bg-brand-blue/10 text-brand-blue rounded border border-brand-blue/20 hover:bg-brand-blue hover:text-white transition-all"
                                       title="Adicionar ao carrinho"
                                     >
@@ -3795,8 +3897,8 @@ function InventoryDashboardView({
                 </div>
               )}
 
-              <div className="p-6 border-t border-brand-border bg-zinc-50 dark:bg-black/40 backdrop-blur-3xl flex justify-between items-center">
-                <div className="text-[9px] text-zinc-500 dark:text-brand-text-secondary font-black font-mono uppercase tracking-[0.1em]">
+              <div className="p-6 border-t border-brand-border/30 dark:border-white/5 bg-black/[0.03] dark:bg-white/[0.02] backdrop-blur-3xl flex justify-between items-center">
+                <div className="text-[9px] text-brand-text-secondary font-black font-mono uppercase tracking-[0.1em]">
                   PÁGINA {page + 1} DE {Math.max(1, totalPages)}
                   <span className="mx-3 opacity-20">|</span> {filteredData.filtered.length.toLocaleString()} SKUs INDEXADOS
                 </div>
@@ -3804,7 +3906,7 @@ function InventoryDashboardView({
                   <button 
                     disabled={page === 0}
                     onClick={() => setPage(p => p - 1)}
-                    className="px-6 py-2.5 rounded-xl border border-brand-border hover:border-brand-blue hover:text-brand-blue transition-all uppercase font-black text-[9px] tracking-widest bg-white dark:bg-black/20 group shadow-sm disabled:opacity-30 overflow-hidden relative"
+                    className="px-6 py-2.5 rounded-xl border border-brand-border/30 dark:border-white/10 hover:border-brand-blue hover:text-brand-blue transition-all uppercase font-black text-[9px] tracking-widest bg-black/[0.03] dark:bg-white/[0.04] group shadow-sm disabled:opacity-30 overflow-hidden relative"
                   >
                     <div className="relative z-10 flex items-center gap-2">
                       <ChevronLeft className="w-3.5 h-3.5" /> ANTERIOR
@@ -3813,7 +3915,7 @@ function InventoryDashboardView({
                   <button 
                     disabled={page >= totalPages - 1}
                     onClick={() => setPage(p => p + 1)}
-                    className="px-6 py-2.5 rounded-xl border border-brand-border hover:border-brand-blue hover:text-brand-blue transition-all uppercase font-black text-[9px] tracking-widest bg-white dark:bg-black/20 group shadow-sm disabled:opacity-30 overflow-hidden relative"
+                    className="px-6 py-2.5 rounded-xl border border-brand-border/30 dark:border-white/10 hover:border-brand-blue hover:text-brand-blue transition-all uppercase font-black text-[9px] tracking-widest bg-black/[0.03] dark:bg-white/[0.04] group shadow-sm disabled:opacity-30 overflow-hidden relative"
                   >
                     <div className="relative z-10 flex items-center gap-2">
                       PRÓXIMO <ChevronRight className="w-3.5 h-3.5" />
@@ -3834,6 +3936,10 @@ function InventoryDashboardView({
             theme={theme}
             selectedFiliais={selectedFiliais}
             filterAno={filterAno}
+            addToCart={addToCart}
+            removeFromCart={removeFromCart}
+            isItemInCart={isItemInCart}
+            cartItems={cartItems}
           />
         )}
         {separationModal?.isOpen && (
@@ -3846,8 +3952,8 @@ function InventoryDashboardView({
             >
               <div className="p-8">
                 <div className="flex gap-4 mb-6">
-                  <div className="w-12 h-12 bg-brand-purple/10 rounded-2xl flex items-center justify-center border border-brand-purple/20 shadow-inner">
-                    <Mail className="w-6 h-6 text-brand-purple" />
+                  <div className="w-12 h-12 bg-brand-green/10 rounded-2xl flex items-center justify-center border border-brand-green/20 shadow-inner">
+                    <Mail className="w-6 h-6 text-brand-green" />
                   </div>
                   <div className="w-12 h-12 bg-green-500/10 rounded-2xl flex items-center justify-center border border-green-500/20 shadow-inner">
                     <MessageSquare className="w-6 h-6 text-green-500" />
@@ -3856,8 +3962,8 @@ function InventoryDashboardView({
                 
                 <h3 className="text-xl font-black text-brand-text-primary uppercase tracking-tight mb-2">Enviar para Separação</h3>
                 <p className="text-xs text-brand-text-secondary mb-6 leading-relaxed">
-                  Deseja confirmar a separação de materiais para <span className="font-bold text-brand-purple">{separationModal.destBranch}</span>? 
-                  Escolha enviar por <span className="font-bold text-brand-purple">E-mail</span> ou instantaneamente via <span className="font-bold text-green-500">WhatsApp</span>.
+                  Deseja confirmar a separação de materiais para <span className="font-bold text-brand-green">{separationModal.destBranch}</span>? 
+                  Escolha enviar por <span className="font-bold text-brand-green">E-mail</span> ou instantaneamente via <span className="font-bold text-green-500">WhatsApp</span>.
                 </p>
 
                 <div className="space-y-4">
@@ -3865,11 +3971,11 @@ function InventoryDashboardView({
                   <div>
                     <label className="text-[10px] font-black text-brand-text-secondary uppercase tracking-widest ml-1 mb-2 block">E-mail de Destino</label>
                     <div className="relative group">
-                      <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-text-secondary group-focus-within:text-brand-purple transition-colors" />
+                      <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-text-secondary group-focus-within:text-brand-green transition-colors" />
                       <input 
                         type="email"
                         placeholder="exemplo@empresa.com.br"
-                        className="w-full bg-black/5 dark:bg-white/5 border border-brand-border/10 h-14 rounded-2xl pl-12 pr-6 text-sm font-bold focus:border-brand-purple/50 focus:ring-4 focus:ring-brand-purple/5 outline-none transition-all placeholder:opacity-30"
+                        className="w-full bg-black/5 dark:bg-white/5 border border-brand-border/10 h-14 rounded-2xl pl-12 pr-6 text-sm font-bold focus:border-brand-green/50 focus:ring-4 focus:ring-brand-green/5 outline-none transition-all placeholder:opacity-30"
                         value={separationModal.email}
                         onChange={(e) => setSeparationModal({ ...separationModal, email: e.target.value })}
                         autoFocus
@@ -3896,11 +4002,11 @@ function InventoryDashboardView({
                   </div>
 
                   {/* Google Sheets Checkbox */}
-                  <div className="flex items-center gap-3 p-4 bg-brand-purple/5 dark:bg-brand-purple/10 border border-brand-purple/10 rounded-2xl mt-4">
+                  <div className="flex items-center gap-3 p-4 bg-brand-green/5 dark:bg-brand-green/10 border border-brand-green/10 rounded-2xl mt-4">
                     <input 
                       type="checkbox"
                       id="update-sheets-checkbox"
-                      className="w-5 h-5 rounded-md border-zinc-300 dark:border-zinc-700 text-brand-purple focus:ring-brand-purple focus:ring-opacity-20 cursor-pointer accent-brand-purple"
+                      className="w-5 h-5 rounded-md border-zinc-300 dark:border-zinc-700 text-brand-green focus:ring-brand-green focus:ring-opacity-20 cursor-pointer accent-brand-green"
                       checked={updateSheets}
                       onChange={(e) => setUpdateSheets(e.target.checked)}
                     />
@@ -3916,7 +4022,7 @@ function InventoryDashboardView({
                       type="button"
                       disabled={isSendingEmail}
                       onClick={() => handleConfirmAndSend('email')}
-                      className="flex-1 h-12 bg-brand-purple text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-lg shadow-brand-purple/30 flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+                      className="flex-1 h-12 bg-brand-green text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-lg shadow-brand-green/30 flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
                     >
                       {isSendingEmail ? (
                         <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
