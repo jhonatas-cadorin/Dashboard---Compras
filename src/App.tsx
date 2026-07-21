@@ -299,28 +299,118 @@ async function carregarPlanilha(): Promise<DashboardData | null> {
 
     // Helper to parse month index and year from a key
     const parseMonthAndYear = (key: string): { monthIndex: number; year: number } | null => {
-      const normKey = key.toLowerCase().trim()
+      if (!key) return null;
+      let normKey = key.toLowerCase().trim()
         .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
+      // 1. Check for Excel Serial Dates
+      const num = Number(normKey);
+      if (!isNaN(num) && num >= 44000 && num <= 49000 && Number.isInteger(num)) {
+        const dateObj = new Date((num - 25569) * 86400 * 1000);
+        if (!isNaN(dateObj.getTime())) {
+          return { monthIndex: dateObj.getUTCMonth(), year: dateObj.getUTCFullYear() };
+        }
+      }
+
+      // 2. Check for standard Date parsing if it looks like a full Date string
+      if (normKey.includes(' gmt') || normKey.includes(' utc')) {
+        const parsedDate = new Date(key);
+        if (!isNaN(parsedDate.getTime())) {
+          const year = parsedDate.getFullYear();
+          if (year >= 2020 && year <= 2035) {
+            return { monthIndex: parsedDate.getMonth(), year };
+          }
+        }
+      }
+
+      // 3. Try to parse purely numeric dates with separators (e.g. 01/25, 01/01/25, 2025-01-01)
+      const cleanKey = normKey.replace(/[-.\s]/g, '/');
+      const parts = cleanKey.split('/').filter(p => p.length > 0);
+      const allNumeric = parts.length > 0 && parts.every(p => /^\d+$/.test(p));
+
+      if (allNumeric) {
+        if (parts.length === 3) {
+          const p1 = parseInt(parts[0], 10);
+          const p2 = parseInt(parts[1], 10);
+          let p3 = parseInt(parts[2], 10);
+          
+          if (p1 >= 2020 && p1 <= 2035) {
+            if (p2 >= 1 && p2 <= 12) {
+              return { monthIndex: p2 - 1, year: p1 };
+            }
+          }
+          
+          if (p3 < 100) p3 += 2000;
+          if (p3 >= 2020 && p3 <= 2035) {
+            let month = -1;
+            if (p1 > 12 && p2 >= 1 && p2 <= 12) {
+              month = p2;
+            } else if (p2 > 12 && p1 >= 1 && p1 <= 12) {
+              month = p1;
+            } else if (p1 >= 1 && p1 <= 12 && p2 >= 1 && p2 <= 12) {
+              month = p2;
+            }
+            if (month >= 1 && month <= 12) {
+              return { monthIndex: month - 1, year: p3 };
+            }
+          }
+        } else if (parts.length === 2) {
+          const p1 = parseInt(parts[0], 10);
+          const p2 = parseInt(parts[1], 10);
+          
+          if (p1 >= 2020 && p1 <= 2035 && p2 >= 1 && p2 <= 12) {
+            return { monthIndex: p2 - 1, year: p1 };
+          }
+          if (p2 >= 2020 && p2 <= 2035 && p1 >= 1 && p1 <= 12) {
+            return { monthIndex: p1 - 1, year: p2 };
+          }
+          
+          let yr1 = p1;
+          let yr2 = p2;
+          if (yr1 < 100) yr1 += 2000;
+          if (yr2 < 100) yr2 += 2000;
+          
+          if (yr2 >= 2020 && yr2 <= 2035 && p1 >= 1 && p1 <= 12) {
+            return { monthIndex: p1 - 1, year: yr2 };
+          } else if (yr1 >= 2020 && yr1 <= 2035 && p2 >= 1 && p2 <= 12) {
+            return { monthIndex: p2 - 1, year: yr1 };
+          }
+        }
+      }
+
+      // 4. Text-based month names detection
       const monthTerms = [
-        { index: 0, names: ['janeiro', 'jan', 'm1', 'mes_1'] },
-        { index: 1, names: ['fevereiro', 'fev', 'm2', 'mes_2'] },
-        { index: 2, names: ['marco', 'mar', 'm3', 'mes_3'] },
-        { index: 3, names: ['abril', 'abr', 'm4', 'mes_4'] },
-        { index: 4, names: ['maio', 'mai', 'm5', 'mes_5'] },
-        { index: 5, names: ['junho', 'jun', 'm6', 'mes_6'] },
-        { index: 6, names: ['julho', 'jul', 'm7', 'mes_7'] },
-        { index: 7, names: ['agosto', 'ago', 'm8', 'mes_8'] },
-        { index: 8, names: ['setembro', 'set', 'm9', 'mes_9'] },
-        { index: 9, names: ['outubro', 'out', 'm10', 'mes_10'] },
-        { index: 10, names: ['novembro', 'nov', 'm11', 'mes_11'] },
-        { index: 11, names: ['dezembro', 'dez', 'm12', 'mes_12'] }
+        { index: 11, names: ['dezembro', 'dez', 'december', 'dec', 'mes_12', 'm12'] },
+        { index: 10, names: ['novembro', 'nov', 'november', 'mes_11', 'm11'] },
+        { index: 9, names: ['outubro', 'out', 'october', 'oct', 'mes_10', 'm10'] },
+        { index: 8, names: ['setembro', 'set', 'september', 'sep', 'mes_9', 'm9'] },
+        { index: 7, names: ['agosto', 'ago', 'august', 'aug', 'mes_8', 'm8'] },
+        { index: 6, names: ['julho', 'jul', 'july', 'jul', 'mes_7', 'm7'] },
+        { index: 5, names: ['junho', 'jun', 'june', 'mes_6', 'm6'] },
+        { index: 4, names: ['maio', 'mai', 'may', 'mes_5', 'm5'] },
+        { index: 3, names: ['abril', 'abr', 'april', 'apr', 'mes_4', 'm4'] },
+        { index: 2, names: ['marco', 'mar', 'march', 'mes_3', 'm3'] },
+        { index: 1, names: ['fevereiro', 'fev', 'february', 'feb', 'mes_2', 'm2'] },
+        { index: 0, names: ['janeiro', 'jan', 'january', 'mes_1', 'm1'] }
       ];
 
       let foundMonthIndex = -1;
       for (const term of monthTerms) {
         for (const name of term.names) {
-          if (normKey === name || normKey.startsWith(name + '_') || normKey.startsWith(name + '/') || normKey.startsWith(name + ' ') || (normKey.includes(name) && !normKey.includes('media') && !normKey.includes('meta'))) {
+          const hasExactWord = normKey === name || 
+                               normKey.startsWith(name + '_') || 
+                               normKey.startsWith(name + '/') || 
+                               normKey.startsWith(name + ' ') || 
+                               normKey.startsWith(name + '-') || 
+                               normKey.endsWith('_' + name) || 
+                               normKey.endsWith('/' + name) || 
+                               normKey.endsWith('-' + name) || 
+                               normKey.includes('_' + name + '_') || 
+                               normKey.includes('/' + name + '/') ||
+                               normKey.includes('-' + name + '-') ||
+                               (normKey.includes(name) && !normKey.includes('media') && !normKey.includes('meta'));
+          
+          if (hasExactWord) {
             foundMonthIndex = term.index;
             break;
           }
@@ -330,25 +420,24 @@ async function carregarPlanilha(): Promise<DashboardData | null> {
 
       if (foundMonthIndex === -1) return null;
 
-      // Extract year (e.g. check for 4 digits like 2025 or 2 digits like 25, 26, 27, 28)
-      const matchYear4 = normKey.match(/\b(20\d{2})\b/) || normKey.match(/_(20\d{2})_/) || normKey.match(/\/(20\d{2})/);
+      const matchYear4 = normKey.match(/(?:^|[^0-9])(202[4-9]|203[0-5])(?:$|[^0-9])/);
       if (matchYear4) {
         return { monthIndex: foundMonthIndex, year: parseInt(matchYear4[1], 10) };
       }
 
-      const matchYear2 = normKey.match(/\b(2[5-9]|3[0-5])\b/) || normKey.match(/_(2[5-9]|3[0-5])/) || normKey.match(/\/(2[5-9]|3[0-5])/) || normKey.match(/(2[5-9]|3[0-5])$/);
+      const matchYear2 = normKey.match(/(?:^|[^0-9])(2[4-9]|3[0-5])(?:$|[^0-9])/);
       if (matchYear2) {
         return { monthIndex: foundMonthIndex, year: 2000 + parseInt(matchYear2[1], 10) };
       }
 
-      return null;
+      return { monthIndex: foundMonthIndex, year: null as any };
     };
 
     const globalDetectedYearsSet = new Set<number>();
     if (normalizedData.length > 0) {
       Object.keys(normalizedData[0]).forEach(key => {
         const parsed = parseMonthAndYear(key);
-        if (parsed) {
+        if (parsed && parsed.year !== null) {
           globalDetectedYearsSet.add(parsed.year);
         }
       });
@@ -388,14 +477,28 @@ async function carregarPlanilha(): Promise<DashboardData | null> {
        Object.keys(r).forEach(key => {
          const parsed = parseMonthAndYear(key);
          if (parsed) {
-           if (!mesesByYear[parsed.year]) {
-             mesesByYear[parsed.year] = Array(12).fill(0);
+           let yr = parsed.year;
+           if (yr === null) {
+             yr = availableYears[0] || 2025;
            }
-           mesesByYear[parsed.year][parsed.monthIndex] = parseNum(r[key]);
+           if (!mesesByYear[yr]) {
+             mesesByYear[yr] = Array(12).fill(0);
+           }
+           mesesByYear[yr][parsed.monthIndex] = parseNum(r[key]);
          }
        });
 
-       // Fallback for default year
+       // Re-populate meses array with the sum across all years in mesesByYear
+       for (let i = 0; i < 12; i++) {
+         let sum = 0;
+         Object.keys(mesesByYear).forEach(yrStr => {
+           const yr = parseInt(yrStr, 10);
+           sum += mesesByYear[yr][i] || 0;
+         });
+         meses[i] = sum;
+       }
+
+       // Fallback for default year if mesesByYear is still empty
        const defaultYear = availableYears[0] || 2025;
        if (!mesesByYear[defaultYear]) {
          mesesByYear[defaultYear] = [...meses];
@@ -581,17 +684,48 @@ function ItemDetailModal({
   data, 
   onClose,
   theme,
-  selectedFiliais = []
+  selectedFiliais = [],
+  filterAno = ''
 }: { 
   item: any, 
   data: DashboardData, 
   onClose: () => void,
   theme: 'light' | 'dark',
-  selectedFiliais?: string[]
+  selectedFiliais?: string[],
+  filterAno?: string
 }) {
-  const networkOptions = useMemo(() => (data.inventoryRecords || [])
-    .filter(r => r.cod === item.cod && r.filial.split(' - ')[0] !== item.filial.split(' - ')[0] && r.saldoTransferivel > 0)
-    .sort((a, b) => b.saldoTransferivel - a.saldoTransferivel), [data.inventoryRecords, item]);
+  const networkOptions = useMemo(() => {
+    const rawOptions = (data.inventoryRecords || [])
+      .filter(r => r.cod === item.cod && r.filial.split(' - ')[0] !== item.filial.split(' - ')[0]);
+
+    return rawOptions.map((rOriginal: any) => {
+      let r = { ...rOriginal };
+      if (filterAno && r.mesesByYear && r.mesesByYear[parseInt(filterAno, 10)]) {
+        const yearInt = parseInt(filterAno, 10);
+        r.meses = r.mesesByYear[yearInt];
+        r.total_mov = r.meses.reduce((a: number, b: number) => a + b, 0);
+        r.saldoTransferivel = Math.max(0, r.saldo - r.total_mov);
+      } else if (!filterAno && r.mesesByYear) {
+        const years = Object.keys(r.mesesByYear).map(y => parseInt(y, 10));
+        if (years.length > 0) {
+          const sumMeses = Array(12).fill(0);
+          years.forEach(yr => {
+            const yrMeses = r.mesesByYear![yr];
+            if (yrMeses) {
+              for (let m = 0; m < 12; m++) {
+                sumMeses[m] += yrMeses[m] || 0;
+              }
+            }
+          });
+          r.meses = sumMeses;
+          r.total_mov = r.meses.reduce((a: number, b: number) => a + b, 0);
+          r.saldoTransferivel = Math.max(0, r.saldo - r.total_mov);
+        }
+      }
+      return r;
+    }).filter(r => r.saldoTransferivel > 0)
+      .sort((a, b) => b.saldoTransferivel - a.saldoTransferivel);
+  }, [data.inventoryRecords, item, filterAno]);
 
   const chartColors = useMemo(() => ({
     stroke: theme === 'dark' ? "#3b82f6" : "#1d4ed8",
@@ -615,11 +749,40 @@ function ItemDetailModal({
 
   const selectedBranchesRecords = useMemo(() => {
     if (!selectedFiliais || selectedFiliais.length === 0) return [];
-    return (data.inventoryRecords || []).filter(r => 
+    const filtered = (data.inventoryRecords || []).filter(r => 
       r.cod === item.cod && 
       selectedFiliais.includes(r.filial)
     );
-  }, [data.inventoryRecords, item.cod, selectedFiliais]);
+
+    return filtered.map((rOriginal: any) => {
+      let r = { ...rOriginal };
+      if (filterAno && r.mesesByYear && r.mesesByYear[parseInt(filterAno, 10)]) {
+        const yearInt = parseInt(filterAno, 10);
+        r.meses = r.mesesByYear[yearInt];
+        r.total_mov = r.meses.reduce((a: number, b: number) => a + (b || 0), 0);
+        r.media = r.total_mov / 12;
+        r.cobertura = r.media > 0 ? r.saldo / r.media : (r.saldo > 0 ? 99 : 0);
+      } else if (!filterAno && r.mesesByYear) {
+        const years = Object.keys(r.mesesByYear).map(y => parseInt(y, 10));
+        if (years.length > 0) {
+          const sumMeses = Array(12).fill(0);
+          years.forEach(yr => {
+            const yrMeses = r.mesesByYear![yr];
+            if (yrMeses) {
+              for (let m = 0; m < 12; m++) {
+                sumMeses[m] += yrMeses[m] || 0;
+              }
+            }
+          });
+          r.meses = sumMeses;
+          r.total_mov = r.meses.reduce((a: number, b: number) => a + (b || 0), 0);
+          r.media = r.total_mov / 12;
+          r.cobertura = r.media > 0 ? r.saldo / r.media : (r.saldo > 0 ? 99 : 0);
+        }
+      }
+      return r;
+    });
+  }, [data.inventoryRecords, item.cod, selectedFiliais, filterAno]);
 
   useEffect(() => {
     if (!item.recommendation && !loadingAI) {
@@ -911,6 +1074,12 @@ function ItemDetailModal({
                               </div>
                             );
                           })}
+                          <div className="flex-1 min-w-[50px] text-center bg-brand-purple/10 dark:bg-brand-purple/20 py-1.5 rounded-lg border border-brand-purple/30">
+                            <div className="text-[7px] font-black text-brand-purple uppercase font-mono">ANUAL</div>
+                            <div className="text-[9px] font-black mt-0.5 text-brand-purple font-mono">
+                              {(br.meses?.reduce((a: number, b: number) => a + (b || 0), 0) || 0).toLocaleString()}
+                            </div>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -984,6 +1153,12 @@ function ItemDetailModal({
                         </div>
                       );
                     })}
+                    <div className="flex-1 min-w-[55px] text-center bg-brand-green/10 dark:bg-brand-green/20 py-2 rounded-lg border border-brand-green/30">
+                      <div className="text-[8px] font-black text-brand-green uppercase font-mono">ANUAL</div>
+                      <div className="text-[10px] font-black mt-1 text-brand-green font-mono">
+                        {(selectedBranch.meses?.reduce((a: number, b: number) => a + (b || 0), 0) || 0).toLocaleString()}
+                      </div>
+                    </div>
                   </div>
                 </div>
               </motion.div>
@@ -1103,7 +1278,8 @@ function InventoryDashboardView({
   setActiveModule,
   viewType: propViewType,
   setViewType: propSetViewType,
-  setData
+  setData,
+  filterAno = ''
 }: { 
   data: DashboardData, 
   filteredData: any,
@@ -1127,7 +1303,8 @@ function InventoryDashboardView({
   setActiveModule?: (m: Module) => void,
   viewType?: 'grid' | 'table',
   setViewType?: (vt: 'grid' | 'table') => void,
-  setData?: React.Dispatch<React.SetStateAction<DashboardData | null>>
+  setData?: React.Dispatch<React.SetStateAction<DashboardData | null>>,
+  filterAno?: string
 }) {
   const [page, setPage] = useState(0);
   const [selectedItem, setSelectedItem] = useState<any | null>(null);
@@ -3656,6 +3833,7 @@ function InventoryDashboardView({
             onClose={() => setSelectedItem(null)}
             theme={theme}
             selectedFiliais={selectedFiliais}
+            filterAno={filterAno}
           />
         )}
         {separationModal?.isOpen && (
@@ -4907,6 +5085,19 @@ function Dashboard() {
         const total_mov = meses.reduce((a: number, b: number) => a + b, 0);
         r.total_mov = total_mov;
         r.saldoTransferivel = Math.max(0, r.saldo - total_mov);
+      } else if (!filterAno && r.mesesByYear) {
+        const years = Object.keys(r.mesesByYear).map(y => parseInt(y, 10));
+        if (years.length > 0) {
+          let sumTotal = 0;
+          years.forEach(yr => {
+            const yrMeses = r.mesesByYear![yr];
+            if (yrMeses) {
+              sumTotal += yrMeses.reduce((a: number, b: number) => a + b, 0);
+            }
+          });
+          r.total_mov = sumTotal;
+          r.saldoTransferivel = Math.max(0, r.saldo - sumTotal);
+        }
       }
       
       if (r.saldoTransferivel > 0) {
@@ -4975,6 +5166,29 @@ function Dashboard() {
         r.cobertura = r.media > 0 ? r.saldo / r.media : (r.saldo > 0 ? 99 : 0);
         r.sugestao = Math.max(0, (r.media * 2) - r.saldo);
         r.saldoTransferivel = Math.max(0, r.saldo - r.total_mov);
+      } else if (!filterAno && r.mesesByYear) {
+        const years = Object.keys(r.mesesByYear).map(y => parseInt(y, 10));
+        if (years.length > 0) {
+          const sumMeses = Array(12).fill(0);
+          years.forEach(yr => {
+            const yrMeses = r.mesesByYear![yr];
+            if (yrMeses) {
+              for (let m = 0; m < 12; m++) {
+                sumMeses[m] += yrMeses[m] || 0;
+              }
+            }
+          });
+          r.meses = sumMeses;
+          r.total_mov = r.meses.reduce((a: number, b: number) => a + b, 0);
+          r.media = r.total_mov / 12;
+          r.t1 = r.meses.slice(0, 3).reduce((a: number, b: number) => a + b, 0);
+          r.t2 = r.meses.slice(3, 6).reduce((a: number, b: number) => a + b, 0);
+          r.t3 = r.meses.slice(6, 9).reduce((a: number, b: number) => a + b, 0);
+          r.t4 = r.meses.slice(9, 12).reduce((a: number, b: number) => a + b, 0);
+          r.cobertura = r.media > 0 ? r.saldo / r.media : (r.saldo > 0 ? 99 : 0);
+          r.sugestao = Math.max(0, (r.media * 2) - r.saldo);
+          r.saldoTransferivel = Math.max(0, r.saldo - r.total_mov);
+        }
       }
 
       // Exclude items with no stock and no movement from intelligence
@@ -5788,6 +6002,7 @@ function Dashboard() {
                   onExportExcel={handleExportExcel}
                   onExportPDF={handleExportPDF}
                   onPrint={handlePrint}
+                  filterAno={filterAno}
                   filters={{
                     filial: selectedFiliais.length === 1 ? selectedFiliais[0] : '',
                     group: filterGroup,

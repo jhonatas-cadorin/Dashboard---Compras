@@ -17,6 +17,141 @@ function normalizeString(val: any): string {
     .trim();
 }
 
+function parseMonthAndYear(key: string): { monthIndex: number; year: number } | null {
+  if (!key) return null;
+  let normKey = key.toLowerCase().trim()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+  // 1. Check for Excel Serial Dates
+  const num = Number(normKey);
+  if (!isNaN(num) && num >= 44000 && num <= 49000 && Number.isInteger(num)) {
+    const dateObj = new Date((num - 25569) * 86400 * 1000);
+    if (!isNaN(dateObj.getTime())) {
+      return { monthIndex: dateObj.getUTCMonth(), year: dateObj.getUTCFullYear() };
+    }
+  }
+
+  // 2. Check for standard Date parsing if it looks like a full Date string
+  if (normKey.includes(' gmt') || normKey.includes(' utc')) {
+    const parsedDate = new Date(key);
+    if (!isNaN(parsedDate.getTime())) {
+      const year = parsedDate.getFullYear();
+      if (year >= 2020 && year <= 2035) {
+        return { monthIndex: parsedDate.getMonth(), year };
+      }
+    }
+  }
+
+  // 3. Try to parse purely numeric dates with separators (e.g. 01/25, 01/01/25, 2025-01-01)
+  const cleanKey = normKey.replace(/[-.\s]/g, '/');
+  const parts = cleanKey.split('/').filter(p => p.length > 0);
+  const allNumeric = parts.length > 0 && parts.every(p => /^\d+$/.test(p));
+
+  if (allNumeric) {
+    if (parts.length === 3) {
+      const p1 = parseInt(parts[0], 10);
+      const p2 = parseInt(parts[1], 10);
+      let p3 = parseInt(parts[2], 10);
+      
+      if (p1 >= 2020 && p1 <= 2035) {
+        if (p2 >= 1 && p2 <= 12) {
+          return { monthIndex: p2 - 1, year: p1 };
+        }
+      }
+      
+      if (p3 < 100) p3 += 2000;
+      if (p3 >= 2020 && p3 <= 2035) {
+        let month = -1;
+        if (p1 > 12 && p2 >= 1 && p2 <= 12) {
+          month = p2;
+        } else if (p2 > 12 && p1 >= 1 && p1 <= 12) {
+          month = p1;
+        } else if (p1 >= 1 && p1 <= 12 && p2 >= 1 && p2 <= 12) {
+          month = p2;
+        }
+        if (month >= 1 && month <= 12) {
+          return { monthIndex: month - 1, year: p3 };
+        }
+      }
+    } else if (parts.length === 2) {
+      const p1 = parseInt(parts[0], 10);
+      const p2 = parseInt(parts[1], 10);
+      
+      if (p1 >= 2020 && p1 <= 2035 && p2 >= 1 && p2 <= 12) {
+        return { monthIndex: p2 - 1, year: p1 };
+      }
+      if (p2 >= 2020 && p2 <= 2035 && p1 >= 1 && p1 <= 12) {
+        return { monthIndex: p1 - 1, year: p2 };
+      }
+      
+      let yr1 = p1;
+      let yr2 = p2;
+      if (yr1 < 100) yr1 += 2000;
+      if (yr2 < 100) yr2 += 2000;
+      
+      if (yr2 >= 2020 && yr2 <= 2035 && p1 >= 1 && p1 <= 12) {
+        return { monthIndex: p1 - 1, year: yr2 };
+      } else if (yr1 >= 2020 && yr1 <= 2035 && p2 >= 1 && p2 <= 12) {
+        return { monthIndex: p2 - 1, year: yr1 };
+      }
+    }
+  }
+
+  // 4. Text-based month names detection
+  const monthTerms = [
+    { index: 11, names: ['dezembro', 'dez', 'december', 'dec', 'mes_12', 'm12'] },
+    { index: 10, names: ['novembro', 'nov', 'november', 'mes_11', 'm11'] },
+    { index: 9, names: ['outubro', 'out', 'october', 'oct', 'mes_10', 'm10'] },
+    { index: 8, names: ['setembro', 'set', 'september', 'sep', 'mes_9', 'm9'] },
+    { index: 7, names: ['agosto', 'ago', 'august', 'aug', 'mes_8', 'm8'] },
+    { index: 6, names: ['julho', 'jul', 'july', 'jul', 'mes_7', 'm7'] },
+    { index: 5, names: ['junho', 'jun', 'june', 'mes_6', 'm6'] },
+    { index: 4, names: ['maio', 'mai', 'may', 'mes_5', 'm5'] },
+    { index: 3, names: ['abril', 'abr', 'april', 'apr', 'mes_4', 'm4'] },
+    { index: 2, names: ['marco', 'mar', 'march', 'mes_3', 'm3'] },
+    { index: 1, names: ['fevereiro', 'fev', 'february', 'feb', 'mes_2', 'm2'] },
+    { index: 0, names: ['janeiro', 'jan', 'january', 'mes_1', 'm1'] }
+  ];
+
+  let foundMonthIndex = -1;
+  for (const term of monthTerms) {
+    for (const name of term.names) {
+      const hasExactWord = normKey === name || 
+                           normKey.startsWith(name + '_') || 
+                           normKey.startsWith(name + '/') || 
+                           normKey.startsWith(name + ' ') || 
+                           normKey.startsWith(name + '-') || 
+                           normKey.endsWith('_' + name) || 
+                           normKey.endsWith('/' + name) || 
+                           normKey.endsWith('-' + name) || 
+                           normKey.includes('_' + name + '_') || 
+                           normKey.includes('/' + name + '/') ||
+                           normKey.includes('-' + name + '-') ||
+                           (normKey.includes(name) && !normKey.includes('media') && !normKey.includes('meta'));
+      
+      if (hasExactWord) {
+        foundMonthIndex = term.index;
+        break;
+      }
+    }
+    if (foundMonthIndex !== -1) break;
+  }
+
+  if (foundMonthIndex === -1) return null;
+
+  const matchYear4 = normKey.match(/(?:^|[^0-9])(202[4-9]|203[0-5])(?:$|[^0-9])/);
+  if (matchYear4) {
+    return { monthIndex: foundMonthIndex, year: parseInt(matchYear4[1], 10) };
+  }
+
+  const matchYear2 = normKey.match(/(?:^|[^0-9])(2[4-9]|3[0-5])(?:$|[^0-9])/);
+  if (matchYear2) {
+    return { monthIndex: foundMonthIndex, year: 2000 + parseInt(matchYear2[1], 10) };
+  }
+
+  return { monthIndex: foundMonthIndex, year: null as any };
+}
+
 const parseBrazilianNumber = (val: any) => {
   if (typeof val === 'number') return val;
   if (!val) return 0;
@@ -111,10 +246,20 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
         if (c.includes('preço') || c.includes('preco') || c === 'vlr unit' || c === 'unit price' || c === 'vlr venda') colIdx.preco = idx;
         if (c.includes('lead time') || c.includes('leadtime') || c.includes('prazo') || c.includes('entrega')) colIdx.lead_time = idx;
 
-        // Monthly detection (prioritize specific order if possible)
-        const monthMatch = monthNames.findIndex(m => c === m || c.startsWith(m + '/'));
-        if (monthMatch !== -1) {
-          colIdx.months.push({ name: c, idx, monthIdx: monthMatch });
+        // Monthly detection using new robust parseMonthAndYear
+        const parsed = parseMonthAndYear(c);
+        if (parsed) {
+          colIdx.months.push({ 
+            name: c, 
+            idx, 
+            monthIdx: parsed.monthIndex, 
+            year: parsed.year 
+          });
+        } else {
+          const monthMatch = monthNames.findIndex(m => c === m || c.startsWith(m + '_') || c.startsWith(m + '/'));
+          if (monthMatch !== -1) {
+            colIdx.months.push({ name: c, idx, monthIdx: monthMatch, year: null });
+          }
         }
       });
       // Sort months by calendar order if found out of order
@@ -131,9 +276,20 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
   if (colIdx.months.length === 0 && colIdx.saldo >= 0) {
     const hRow = sheetData[headerRowIdx];
     for (let c = colIdx.saldo + 1; c < hRow.length && colIdx.months.length < 12; c++) {
-      colIdx.months.push({ name: `M${colIdx.months.length + 1}`, idx: c });
+      colIdx.months.push({ name: `M${colIdx.months.length + 1}`, idx: c, monthIdx: colIdx.months.length, year: null });
     }
   }
+
+  const globalDetectedYearsSet = new Set<number>();
+  colIdx.months.forEach((m: any) => {
+    if (m.year) {
+      globalDetectedYearsSet.add(m.year);
+    }
+  });
+
+  const availableYears = globalDetectedYearsSet.size > 0 
+    ? Array.from(globalDetectedYearsSet).sort() 
+    : [2025];
 
   // Data parsing
   const normalizeCrit = (s: string, saldo: number, totalMov: number, coverage: number) => {
@@ -162,19 +318,48 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
     const cod = String(rawRow[colIdx.cod] || '').trim();
     if (!cod || cod.toLowerCase() === 'total' || cod.toLowerCase().includes('subtotal')) continue;
 
-    const monthVals = colIdx.months.map((m: any) => parseBrazilianNumber(rawRow[m.idx]));
-    while (monthVals.length < 12) monthVals.push(0);
+    // Parse meses and mesesByYear
+    const meses = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    const mesesByYear: Record<number, number[]> = {};
+    availableYears.forEach(yr => {
+      mesesByYear[yr] = Array(12).fill(0);
+    });
 
-    const total_mov = colIdx.total_mov >= 0 ? parseBrazilianNumber(rawRow[colIdx.total_mov]) : monthVals.reduce((a: number, v: number) => a + v, 0);
+    colIdx.months.forEach((m: any) => {
+      const val = parseBrazilianNumber(rawRow[m.idx]);
+      if (m.year) {
+        if (!mesesByYear[m.year]) {
+          mesesByYear[m.year] = Array(12).fill(0);
+        }
+        mesesByYear[m.year][m.monthIdx] = val;
+      } else {
+        const defaultYear = availableYears[0] || 2025;
+        if (!mesesByYear[defaultYear]) {
+          mesesByYear[defaultYear] = Array(12).fill(0);
+        }
+        mesesByYear[defaultYear][m.monthIdx] = val;
+      }
+    });
+
+    for (let i = 0; i < 12; i++) {
+      let sum = 0;
+      Object.keys(mesesByYear).forEach(yrStr => {
+        const yr = parseInt(yrStr, 10);
+        sum += mesesByYear[yr][i] || 0;
+      });
+      meses[i] = sum;
+    }
+
+    const total_mov = colIdx.total_mov >= 0 ? parseBrazilianNumber(rawRow[colIdx.total_mov]) : meses.reduce((a: number, v: number) => a + v, 0);
     const media = colIdx.media >= 0 ? parseBrazilianNumber(rawRow[colIdx.media]) : total_mov / 12;
     const saldo = parseBrazilianNumber(rawRow[colIdx.saldo]);
     const coverage = media > 0 ? saldo / media : (saldo > 0 ? 99 : 0);
     
     // Quarterly trends
-    const t1 = monthVals.slice(0, 3).reduce((a, b) => a + b, 0);
-    const t2 = monthVals.slice(3, 6).reduce((a, b) => a + b, 0);
-    const t3 = monthVals.slice(6, 9).reduce((a, b) => a + b, 0);
-    const t4 = monthVals.slice(9, 12).reduce((a, b) => a + b, 0);
+    const t1 = meses.slice(0, 3).reduce((a, b) => a + b, 0);
+    const t2 = meses.slice(3, 6).reduce((a, b) => a + b, 0);
+    const t3 = meses.slice(6, 9).reduce((a, b) => a + b, 0);
+    const t4 = meses.slice(9, 12).reduce((a, b) => a + b, 0);
 
     const custo = colIdx.custo >= 0 ? parseBrazilianNumber(rawRow[colIdx.custo]) : 0;
     const preco = colIdx.preco >= 0 ? parseBrazilianNumber(rawRow[colIdx.preco]) : 0;
@@ -207,8 +392,9 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
       total_mov,
       un: colIdx.un >= 0 ? String(rawRow[colIdx.un] || 'UN').trim() : 'UN',
       fab: colIdx.fab >= 0 ? String(rawRow[colIdx.fab] || 'N/I').trim() : 'N/I',
-      meses: monthVals,
+      meses,
       t1, t2, t3, t4,
+      mesesByYear,
       _normCod: normalizeString(cod),
       _normDesc: normalizeString(String(rawRow[colIdx.desc] || '')),
       _normGrupo: normalizeString(String(rawRow[colIdx.grupo] || 'OUTROS')),
@@ -248,6 +434,7 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
     filiais,
     groups,
     fabs,
+    availableYears,
     inventoryRecords
   };
 }
@@ -308,6 +495,7 @@ export async function processFile(file: File, mode: AppMode): Promise<DashboardD
   if (inventorySheet) {
     const inventoryData = await processInventoryFile(file, inventorySheet);
     result.inventoryRecords = inventoryData.inventoryRecords;
+    result.availableYears = inventoryData.availableYears;
     result.fabs = [...new Set([...(result.fabs || []), ...(inventoryData.fabs || [])])].sort();
     result.groups = [...new Set([...(result.groups || []), ...(inventoryData.groups || [])])].sort();
     result.filiais = [...new Set([...(result.filiais || []), ...(inventoryData.filiais || [])])].sort();
