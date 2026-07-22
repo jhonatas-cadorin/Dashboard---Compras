@@ -1420,6 +1420,22 @@ function InventoryDashboardView({
     tooltipText: theme === 'dark' ? "#f9fafb" : "#0f172a"
   }), [theme]);
   const perPage = 80;
+
+  const transferableMap = filteredData?.inventory?.transferableMap || {};
+
+  const getTransferFiliais = useCallback((r: any) => {
+    const isSaida = r.transferDirection === 'SAIDA';
+    const originRaw = isSaida ? r.filial : r.transferIdealFilial;
+    const destRaw = isSaida ? r.transferIdealFilial : r.filial;
+
+    const originName = cleanFilialName(originRaw || '');
+    const destName = cleanFilialName(destRaw || '');
+    
+    const originSaldo = isSaida ? r.saldo : r.saldoDestino;
+    const destSaldo = isSaida ? r.saldoDestino : r.saldo;
+
+    return { originRaw, destRaw, originName, destName, originSaldo, destSaldo };
+  }, []);
   
   // Reset page when filters change
   useEffect(() => {
@@ -1446,7 +1462,7 @@ function InventoryDashboardView({
     );
   }
   
-  const { metrics, transferableMap } = filteredData;
+  const { metrics } = filteredData;
   const {
     totalSaldo,
     totalMov,
@@ -1548,15 +1564,20 @@ function InventoryDashboardView({
   }, [activeModule]);
 
   const predictions = useMemo(() => {
-    const base = filteredData.filtered || [];
+    const base = filteredData?.filtered || [];
+    let list = base;
     if (viewMode === 'predictive') {
-      return base.filter((r: any) => {
+      list = base.filter((r: any) => {
         const act = (['RUPTURA', 'REPOSIÇÃO'].includes(r.statusSignal) || (r.suggestedPurchase > 0 && r.statusSignal === 'SAUDÁVEL')) && r.total_mov > 0;
         return act;
       });
     }
-    return base;
-  }, [filteredData.filtered, viewMode]);
+    return [...list].sort((a: any, b: any) => {
+      const descA = a.desc || '';
+      const descB = b.desc || '';
+      return descA.localeCompare(descB, 'pt-BR', { sensitivity: 'base' });
+    });
+  }, [filteredData?.filtered, viewMode]);
 
   const slice = predictions.slice(page * perPage, (page + 1) * perPage);
   const totalPages = Math.ceil(predictions.length / perPage);
@@ -2121,7 +2142,7 @@ function InventoryDashboardView({
       desiredQty: value.qty, 
       originReason: value.reason,
       cartKey: key 
-    }));
+    })).sort((a: any, b: any) => (a.desc || '').localeCompare(b.desc || '', 'pt-BR', { sensitivity: 'base' }));
 
     const tItems = itemsInCart.filter(([key, value]) => {
       const myFilial = value.item.filial.split(' - ')[0];
@@ -2142,7 +2163,7 @@ function InventoryDashboardView({
         originReason: value.reason,
         cartKey: key
       };
-    });
+    }).sort((a: any, b: any) => (a.desc || '').localeCompare(b.desc || '', 'pt-BR', { sensitivity: 'base' }));
     
     return { purchaseItems: pItems, transferItems: tItems };
   }, [viewMode, cartItems, transferableMap]);
@@ -2155,6 +2176,9 @@ function InventoryDashboardView({
       if (!groups[dest]) groups[dest] = [];
       groups[dest].push(item);
     });
+    Object.keys(groups).forEach(k => {
+      groups[k].sort((a: any, b: any) => (a.desc || '').localeCompare(b.desc || '', 'pt-BR', { sensitivity: 'base' }));
+    });
     return groups;
   }, [transferItems]);
 
@@ -2164,6 +2188,9 @@ function InventoryDashboardView({
       const vendor = item.fab || 'NÃO INFORMADO';
       if (!groups[vendor]) groups[vendor] = [];
       groups[vendor].push(item);
+    });
+    Object.keys(groups).forEach(k => {
+      groups[k].sort((a: any, b: any) => (a.desc || '').localeCompare(b.desc || '', 'pt-BR', { sensitivity: 'base' }));
     });
     return groups;
   }, [purchaseItems]);
@@ -2850,30 +2877,32 @@ function InventoryDashboardView({
 </tr>
                     </thead>
                     <tbody className="divide-y divide-white/5">
-                      {predictions.slice(0, 100).map((r: any, idx: number) => (
-                        <tr key={`${r.cod}-${r.filial}-${idx}`} 
-                          className="hover:bg-brand-purple/[0.03] transition-all group duration-300 cursor-pointer"
-                          onClick={() => setSelectedItem(r)}
-                        >
-                          <td className="px-6 py-4 font-mono font-black text-[10px] text-brand-purple opacity-80">#{r.cod}</td>
-                          <td className="px-4 py-4">
-                            <div className="text-[13px] font-black text-brand-text-primary break-words max-w-[320px] group-hover:text-brand-purple transition-colors select-all" title={r.desc}>{r.desc}</div>
-                            <div className="text-[9px] uppercase font-bold text-brand-text-secondary mt-0.5 opacity-60 tracking-widest">{r.curva} • {r.grupo}</div>
-                          </td>
-                          {filters.criterio === 'TRANSFERENCIA' ? (
-                            <>
-                              <td className="px-4 py-4 text-center font-black text-[11px] text-brand-text-secondary uppercase tracking-tight">
-                                {r.transferDirection === 'SAIDA' ? cleanFilialName(r.filial) : r.transferIdealFilial}
-                              </td>
-                              <td className="px-4 py-4 text-right font-black text-[12px] text-brand-text-primary">
-                                {r.transferDirection === 'SAIDA' ? r.saldo.toLocaleString() : (r.totalNetworkSurplus.toLocaleString())}
-                              </td>
-                              <td className="px-4 py-4 text-center font-black text-[11px] text-brand-blue uppercase tracking-tight">
-                                {r.transferDirection === 'SAIDA' ? r.transferIdealFilial : cleanFilialName(r.filial)}
-                              </td>
-                              <td className="px-4 py-4 text-right font-black text-[12px] text-brand-text-primary">
-                                {r.saldoDestino.toLocaleString()}
-                              </td>
+                      {predictions.slice(0, 100).map((r: any, idx: number) => {
+                        const transferInfo = getTransferFiliais(r);
+                        return (
+                          <tr key={`${r.cod}-${r.filial}-${idx}`} 
+                            className="hover:bg-brand-purple/[0.03] transition-all group duration-300 cursor-pointer"
+                            onClick={() => setSelectedItem(r)}
+                          >
+                            <td className="px-6 py-4 font-mono font-black text-[10px] text-brand-purple opacity-80">#{r.cod}</td>
+                            <td className="px-4 py-4">
+                              <div className="text-[13px] font-black text-brand-text-primary break-words max-w-[320px] group-hover:text-brand-purple transition-colors select-all" title={r.desc}>{r.desc}</div>
+                              <div className="text-[9px] uppercase font-bold text-brand-text-secondary mt-0.5 opacity-60 tracking-widest">{r.curva} • {r.grupo}</div>
+                            </td>
+                            {filters.criterio === 'TRANSFERENCIA' ? (
+                              <>
+                                <td className="px-4 py-4 text-center font-black text-[11px] text-brand-text-secondary uppercase tracking-tight">
+                                  {transferInfo.originName}
+                                </td>
+                                <td className="px-4 py-4 text-right font-black text-[12px] text-brand-text-primary">
+                                  {transferInfo.originSaldo.toLocaleString()}
+                                </td>
+                                <td className="px-4 py-4 text-center font-black text-[11px] text-brand-blue uppercase tracking-tight">
+                                  {transferInfo.destName}
+                                </td>
+                                <td className="px-4 py-4 text-right font-black text-[12px] text-brand-text-primary">
+                                  {transferInfo.destSaldo.toLocaleString()}
+                                </td>
                               <td className="px-4 py-4 text-center">
                                 <div className="px-2 py-1 bg-brand-orange/10 text-brand-orange text-[11px] font-black rounded border border-brand-orange/20">
                                   {r.recommendedTransferQty}
@@ -2970,7 +2999,7 @@ function InventoryDashboardView({
                               </button>
                             ) : (
                               <button 
-                                onClick={() => addToCart(r, desiredQtys[`${r.cod}-${r.filial}`] ?? (filters.criterio === 'TRANSFERENCIA' ? r.recommendedTransferQty : r.suggestedPurchase), undefined, false, true)}
+                                onClick={() => addToCart(r, desiredQtys[`${r.cod}-${r.filial}`] ?? (filters.criterio === 'TRANSFERENCIA' ? r.recommendedTransferQty : r.suggestedPurchase), filters.criterio === 'TRANSFERENCIA' ? transferInfo.originRaw : undefined, false, true)}
                                 className="p-2 bg-brand-blue/10 hover:bg-brand-blue text-brand-blue hover:text-white rounded-lg transition-all"
                                 title="Adicionar item"
                               >
@@ -2979,7 +3008,7 @@ function InventoryDashboardView({
                             )}
                           </td>
                         </tr>
-                      ))}
+                      )})}
                     </tbody>
                   </table>
                 </div>
@@ -3506,6 +3535,7 @@ function InventoryDashboardView({
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4 p-6 bg-brand-bg">
                   {actionFilteredData.map((r_raw: any, idx: number) => {
                     const r = r_raw;
+                    const transferInfo = getTransferFiliais(r);
                     const isCritical = r.statusSignal === 'RUPTURA' || (r.curva === 'A' && r.coverage < 1);
                     const s = r.statusSignal;
                     const label = CRIT_LABELS[s] || s;
@@ -3557,32 +3587,80 @@ function InventoryDashboardView({
                               className="shrink-0 flex flex-col items-end"
                             >
                               <StatusPill status={r.statusSignal} theme={theme} />
-                              <span className="text-[8px] font-black text-brand-text-secondary uppercase tracking-tighter opacity-40 mt-1">
-                                {cleanFilialName(r.filial)}
+                              <span className="text-[8px] font-black text-brand-text-secondary uppercase tracking-tighter opacity-70 mt-1">
+                                {filters.criterio === 'TRANSFERENCIA' 
+                                  ? `${transferInfo.originName} → ${transferInfo.destName}`
+                                  : cleanFilialName(r.filial)}
                               </span>
                             </div>
                           </div>
 
                           <div className="grid grid-cols-2 gap-3 mb-6">
-                            <div className="p-3 rounded-2xl bg-brand-bg/50 dark:bg-black/40 border border-brand-border/30 dark:border-white/5 flex flex-col relative overflow-hidden group/item">
-                              <div className="absolute top-0 right-0 w-8 h-8 bg-brand-text-secondary/5 -mr-4 -mt-4 rounded-full group-hover/item:scale-150 transition-transform" />
-                              <span className="text-[8px] font-bold text-brand-text-secondary uppercase tracking-widest mb-1.5 opacity-60">Saldo Atual</span>
-                              <div className="flex items-baseline gap-1 relative z-10">
-                                <span className={`text-[18px] font-black tracking-tighter ${r.saldo <= 0 ? 'text-brand-red' : 'text-brand-text-primary'}`}>
-                                  {r.saldo.toLocaleString()}
-                                </span>
-                                <span className="text-[9px] font-medium text-brand-text-secondary uppercase font-mono opacity-40">{r.un}</span>
-                              </div>
-                            </div>
-                            <div className="p-3 rounded-2xl bg-brand-bg/50 dark:bg-black/40 border border-brand-border/30 dark:border-white/5 flex flex-col relative overflow-hidden group/item">
-                              <div className="absolute top-0 right-0 w-8 h-8 bg-brand-blue/5 -mr-4 -mt-4 rounded-full group-hover/item:scale-150 transition-transform" />
-                              <span className="text-[8px] font-bold text-brand-text-secondary uppercase tracking-widest mb-1.5 opacity-60">Movim. 12M</span>
-                              <div className="flex items-baseline gap-1 relative z-10">
-                                <span className="text-[18px] font-black tracking-tighter text-brand-blue">
-                                  {Math.round(r.total_mov).toLocaleString()}
-                                </span>
-                              </div>
-                            </div>
+                            {filters.criterio === 'TRANSFERENCIA' ? (
+                              <>
+                                <div className="p-3 rounded-2xl bg-brand-bg/50 dark:bg-black/40 border border-brand-border/30 dark:border-white/5 flex flex-col relative overflow-hidden group/item">
+                                  <span className="text-[8px] font-bold text-brand-text-secondary uppercase tracking-widest mb-1.5 opacity-60">Origem: {transferInfo.originName}</span>
+                                  <div className="flex items-baseline gap-1 relative z-10">
+                                    <span className="text-[16px] font-black tracking-tighter text-brand-text-primary">
+                                      {transferInfo.originSaldo.toLocaleString()}
+                                    </span>
+                                    <span className="text-[9px] font-medium text-brand-text-secondary uppercase font-mono opacity-40">{r.un}</span>
+                                  </div>
+                                </div>
+                                <div className="p-3 rounded-2xl bg-brand-bg/50 dark:bg-black/40 border border-brand-border/30 dark:border-white/5 flex flex-col relative overflow-hidden group/item">
+                                  <span className="text-[8px] font-bold text-brand-blue uppercase tracking-widest mb-1.5 opacity-60">Destino: {transferInfo.destName}</span>
+                                  <div className="flex items-baseline gap-1 relative z-10">
+                                    <span className="text-[16px] font-black tracking-tighter text-brand-blue">
+                                      {r.recommendedTransferQty.toLocaleString()}
+                                    </span>
+                                    <span className="text-[9px] font-medium text-brand-text-secondary uppercase font-mono opacity-40">{r.un}</span>
+                                  </div>
+                                </div>
+                              </>
+                            ) : filters.criterio === 'COMPRA' ? (
+                              <>
+                                <div className="p-3 rounded-2xl bg-brand-bg/50 dark:bg-black/40 border border-brand-border/30 dark:border-white/5 flex flex-col relative overflow-hidden group/item">
+                                  <span className="text-[8px] font-bold text-brand-text-secondary uppercase tracking-widest mb-1.5 opacity-60">Saldo ({cleanFilialName(r.filial)})</span>
+                                  <div className="flex items-baseline gap-1 relative z-10">
+                                    <span className={`text-[18px] font-black tracking-tighter ${r.saldo <= 0 ? 'text-brand-red' : 'text-brand-text-primary'}`}>
+                                      {r.saldo.toLocaleString()}
+                                    </span>
+                                    <span className="text-[9px] font-medium text-brand-text-secondary uppercase font-mono opacity-40">{r.un}</span>
+                                  </div>
+                                </div>
+                                <div className="p-3 rounded-2xl bg-brand-bg/50 dark:bg-black/40 border border-brand-border/30 dark:border-white/5 flex flex-col relative overflow-hidden group/item">
+                                  <span className="text-[8px] font-bold text-brand-red uppercase tracking-widest mb-1.5 opacity-60">Sugestão Compra</span>
+                                  <div className="flex items-baseline gap-1 relative z-10">
+                                    <span className="text-[18px] font-black tracking-tighter text-brand-red">
+                                      {r.suggestedPurchase.toLocaleString()}
+                                    </span>
+                                    <span className="text-[9px] font-medium text-brand-text-secondary uppercase font-mono opacity-40">{r.un}</span>
+                                  </div>
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <div className="p-3 rounded-2xl bg-brand-bg/50 dark:bg-black/40 border border-brand-border/30 dark:border-white/5 flex flex-col relative overflow-hidden group/item">
+                                  <div className="absolute top-0 right-0 w-8 h-8 bg-brand-text-secondary/5 -mr-4 -mt-4 rounded-full group-hover/item:scale-150 transition-transform" />
+                                  <span className="text-[8px] font-bold text-brand-text-secondary uppercase tracking-widest mb-1.5 opacity-60">Saldo Atual</span>
+                                  <div className="flex items-baseline gap-1 relative z-10">
+                                    <span className={`text-[18px] font-black tracking-tighter ${r.saldo <= 0 ? 'text-brand-red' : 'text-brand-text-primary'}`}>
+                                      {r.saldo.toLocaleString()}
+                                    </span>
+                                    <span className="text-[9px] font-medium text-brand-text-secondary uppercase font-mono opacity-40">{r.un}</span>
+                                  </div>
+                                </div>
+                                <div className="p-3 rounded-2xl bg-brand-bg/50 dark:bg-black/40 border border-brand-border/30 dark:border-white/5 flex flex-col relative overflow-hidden group/item">
+                                  <div className="absolute top-0 right-0 w-8 h-8 bg-brand-blue/5 -mr-4 -mt-4 rounded-full group-hover/item:scale-150 transition-transform" />
+                                  <span className="text-[8px] font-bold text-brand-text-secondary uppercase tracking-widest mb-1.5 opacity-60">Movim. 12M</span>
+                                  <div className="flex items-baseline gap-1 relative z-10">
+                                    <span className="text-[18px] font-black tracking-tighter text-brand-blue">
+                                      {Math.round(r.total_mov).toLocaleString()}
+                                    </span>
+                                  </div>
+                                </div>
+                              </>
+                            )}
                           </div>
 
                           {/* Quick Badges */}
@@ -3706,6 +3784,18 @@ function InventoryDashboardView({
                               <th className="px-4 py-4 border-b border-brand-border text-[9px] uppercase font-black tracking-widest text-brand-text-secondary text-center font-mono">Qtd. Desejada</th>
                               <th className="px-6 py-4 border-b border-brand-border text-[9px] uppercase font-black tracking-widest text-brand-text-secondary font-mono">Status / Justificativa</th>
                             </>
+                          ) : filters.criterio === 'COMPRA' ? (
+                            <>
+                              <th className="px-4 py-4 border-b border-brand-border text-[9px] uppercase font-black tracking-widest text-brand-text-secondary font-mono">Filial</th>
+                              <th className="px-4 py-4 border-b border-brand-border text-[9px] uppercase font-black tracking-widest text-brand-text-secondary text-right font-mono">Saldo</th>
+                              <th className="px-4 py-4 border-b border-brand-border text-[9px] uppercase font-black tracking-widest text-brand-text-secondary text-right font-mono">Mvto 12M</th>
+                              <th className="px-4 py-4 border-b border-brand-border text-[9px] uppercase font-black tracking-widest text-brand-text-secondary text-right font-mono">Méd. Mes</th>
+                              <th className="px-4 py-4 border-b border-brand-border text-[9px] uppercase font-black tracking-widest text-brand-text-secondary text-center font-mono">Curva</th>
+                              <th className="px-4 py-4 border-b border-brand-border text-[9px] uppercase font-black tracking-widest text-brand-text-secondary text-center font-mono">Status</th>
+                              <th className="px-4 py-4 border-b border-brand-border text-[9px] uppercase font-black tracking-widest text-brand-text-secondary text-center font-mono">Qtd. Sugerida Compra</th>
+                              <th className="px-4 py-4 border-b border-brand-border text-[9px] uppercase font-black tracking-widest text-brand-text-secondary text-center font-mono">Qtd. Desejada</th>
+                              <th className="px-6 py-4 border-b border-brand-border text-[9px] uppercase font-black tracking-widest text-brand-text-secondary font-mono">Status / Justificativa</th>
+                            </>
                           ) : (
                             <>
                               <th className="px-4 py-4 border-b border-brand-border text-[9px] uppercase font-black tracking-widest text-brand-text-secondary font-mono">Filial</th>
@@ -3728,6 +3818,7 @@ function InventoryDashboardView({
                           
                           // Clean filial name
                           const cleanFilial = cleanFilialName(r.filial);
+                          const transferInfo = getTransferFiliais(r);
 
                           // Get transfer options (excluding current filial)
                           const others = (transferableMap[r.cod] || [])
@@ -3751,22 +3842,22 @@ function InventoryDashboardView({
                                   <>
                                     <td className="px-4 py-3 text-center">
                                       <div className="text-[9px] font-black text-brand-text-primary uppercase tracking-tight">
-                                        {r.transferDirection === 'SAIDA' ? cleanFilial : r.transferIdealFilial}
+                                        {transferInfo.originName}
                                       </div>
                                     </td>
                                     <td className="px-4 py-3 text-right">
                                       <span className="font-black text-[11px] text-brand-text-primary">
-                                        {r.transferDirection === 'SAIDA' ? r.saldo.toLocaleString() : (r.totalNetworkSurplus.toLocaleString())}
+                                        {transferInfo.originSaldo.toLocaleString()}
                                       </span>
                                     </td>
                                     <td className="px-4 py-3 text-center">
                                       <div className="text-[9px] font-black text-brand-blue uppercase tracking-tight">
-                                        {r.transferDirection === 'SAIDA' ? r.transferIdealFilial : cleanFilial}
+                                        {transferInfo.destName}
                                       </div>
                                     </td>
                                     <td className="px-4 py-3 text-right">
                                       <span className="font-black text-[11px] text-brand-text-primary">
-                                        {r.saldoDestino.toLocaleString()}
+                                        {transferInfo.destSaldo.toLocaleString()}
                                       </span>
                                     </td>
                                     <td className="px-4 py-3 text-center">
@@ -3790,6 +3881,54 @@ function InventoryDashboardView({
                                         <TransferStatusBadge label={r.transferStatusLabel} />
                                         <div className="text-[10px] font-semibold text-brand-text-secondary italic max-w-[200px]">
                                           {r.transferJustification}
+                                        </div>
+                                      </div>
+                                    </td>
+                                  </>
+                                ) : filters.criterio === 'COMPRA' ? (
+                                  <>
+                                    <td className="px-4 py-3">
+                                      <div className="text-[9px] font-black text-brand-text-primary uppercase tracking-tight group-hover:text-brand-blue transition-colors">
+                                        {cleanFilial}
+                                      </div>
+                                    </td>
+                                    <td className="px-4 py-3 text-right">
+                                      <span className={`font-black text-[11px] ${r.saldo <= 0 ? 'text-brand-red' : 'text-brand-text-primary'}`}>{r.saldo.toLocaleString()}</span>
+                                      <span className="ml-1 text-[7px] font-black text-brand-text-secondary opacity-50 uppercase font-mono">{r.un}</span>
+                                    </td>
+                                    <td className="px-4 py-3 text-right font-black text-brand-text-primary/80">{Math.round(r.total_mov).toLocaleString()}</td>
+                                    <td className="px-4 py-3 text-right font-black text-brand-blue">{(r.total_mov / 12).toFixed(1)}</td>
+                                    <td className="px-4 py-3 text-center">
+                                      <span className={`px-2 py-0.5 rounded text-[8px] font-black ${
+                                          r.curva === 'A' ? 'bg-brand-purple/10 text-brand-purple border border-brand-purple/20' :
+                                          r.curva === 'B' ? 'bg-brand-blue/10 text-brand-blue border border-brand-blue/20' :
+                                          'bg-brand-bg border border-brand-border text-brand-text-secondary'
+                                      }`}>{r.curva}</span>
+                                    </td>
+                                    <td className="px-4 py-3 text-center">
+                                      <StatusPill status={r.statusSignal} theme={theme} />
+                                    </td>
+                                    <td className="px-4 py-3 text-center font-black text-brand-red text-[11px]">
+                                      <span className="px-2 py-1 bg-brand-red/10 text-brand-red rounded border border-brand-red/20 font-black">
+                                        {r.suggestedPurchase.toLocaleString()}
+                                      </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-center" onClick={(e) => e.stopPropagation()}>
+                                      <input 
+                                        type="number"
+                                        className="w-16 bg-brand-bg/50 dark:bg-black/40 border border-brand-border dark:border-white/5 rounded-xl px-2 py-1 text-[11px] font-black text-center text-brand-text-primary dark:text-white focus:border-brand-blue outline-none transition-all shadow-inner"
+                                        value={desiredQtys[`${r.cod}-${r.filial}`] ?? r.suggestedPurchase}
+                                        onChange={(e) => setDesiredQtys({
+                                          ...desiredQtys,
+                                          [`${r.cod}-${r.filial}`]: parseInt(e.target.value) || 0
+                                        })}
+                                      />
+                                    </td>
+                                    <td className="px-6 py-3">
+                                      <div className="space-y-1.5 leading-tight">
+                                        <span className="text-[10px] font-bold text-brand-red uppercase">Direcionado para Compra</span>
+                                        <div className="text-[10px] font-semibold text-brand-text-secondary italic max-w-[200px]">
+                                          Necessidade: {r.suggestedPurchase.toLocaleString()} un.
                                         </div>
                                       </div>
                                     </td>
@@ -4564,16 +4703,32 @@ function Dashboard() {
 
   const toggleTheme = () => {
     const next = theme === 'light' ? 'dark' : 'light';
-    setTheme(next);
-    localStorage.setItem('cortex-theme', next);
+    if ((document as any).startViewTransition) {
+      (document as any).startViewTransition(() => {
+        setTheme(next);
+        localStorage.setItem('cortex-theme', next);
+      });
+    } else {
+      setTheme(next);
+      localStorage.setItem('cortex-theme', next);
+    }
   };
 
   useEffect(() => {
+    // Adiciona classe de transição temporária para suavizar a troca de cores nas variáveis CSS
+    document.documentElement.classList.add('theme-transitioning');
+    
     if (theme === 'dark') {
       document.documentElement.classList.add('dark');
     } else {
       document.documentElement.classList.remove('dark');
     }
+    
+    const timer = setTimeout(() => {
+      document.documentElement.classList.remove('theme-transitioning');
+    }, 500);
+    
+    return () => clearTimeout(timer);
   }, [theme]);
 
   const [appMode, setAppMode] = useState<AppMode>(() => {
@@ -5369,20 +5524,22 @@ function Dashboard() {
         
         saldoDestino = r.saldo;
       }
-      else if ((statusSignal === 'SEM_MOVIMENTO' || statusSignal === 'EXCESSO') && hasDemandElsewhere && availableSurplus > 0) {
-        transferDirection = 'SAIDA';
+      else if (hasDemandElsewhere && availableSurplus > 0) {
         const destinations = others.filter(o => o.total_mov > 0).sort((a, b) => b.total_mov - a.total_mov);
-        const bestDest = destinations[0];
-        transferIdealFilial = bestDest.filial;
-        const destNeed = Math.ceil((bestDest.total_mov / 12) * 4);
-        recommendedTransferQty = Math.min(availableSurplus, destNeed);
-        
-        transferJustification = statusSignal === 'SEM_MOVIMENTO' 
-          ? `Item sem giro local (Saldo: ${r.saldo}). Demanda em ${bestDest.filial}.`
-          : `Excesso detectado (Min: ${Math.round(minStockOrigin)}). Enviando excedente para ${bestDest.filial}.`;
-        
-        saldoDestino = bestDest.saldo;
-        transferStatusLabel = 'Redistribuição de Excedente';
+        if (destinations.length > 0) {
+          transferDirection = 'SAIDA';
+          const bestDest = destinations[0];
+          transferIdealFilial = bestDest.filial;
+          const destNeed = Math.ceil((bestDest.total_mov / 12) * 4);
+          recommendedTransferQty = Math.min(availableSurplus, destNeed);
+          
+          transferJustification = statusSignal === 'SEM_MOVIMENTO' 
+            ? `Item sem giro local (Saldo: ${r.saldo}). Demanda em ${bestDest.filial}.`
+            : `Excesso de estoque local. Enviando excedente para ${bestDest.filial}.`;
+          
+          saldoDestino = bestDest.saldo;
+          transferStatusLabel = 'Redistribuição de Excedente';
+        }
       }
 
       const transferBalance = transferables.reduce((acc, curr) => acc + curr.surplus, 0);
@@ -5514,8 +5671,8 @@ function Dashboard() {
           let pass = true;
           if (filterCriterio) {
             const act = (['RUPTURA', 'REPOSIÇÃO'].includes(statusSignal) || (suggestedPurchase > 0 && statusSignal === 'SAUDÁVEL')) && r.total_mov > 0;
-            if (filterCriterio === 'COMPRA') pass = act && !hasTransfer;
-            else if (filterCriterio === 'TRANSFERENCIA') pass = transferDirection !== 'NENHUMA';
+            if (filterCriterio === 'COMPRA') pass = act;
+            else if (filterCriterio === 'TRANSFERENCIA') pass = transferDirection === 'SAIDA';
             else if (filterCriterio === 'URGENTE') pass = statusSignal === 'RUPTURA';
             else if (filterCriterio === 'COMPRAR_JA') pass = statusSignal === 'REPOSIÇÃO';
             else if (filterCriterio === 'COMPRAR_BREVE') pass = suggestedPurchase > 0 && statusSignal === 'SAUDÁVEL';
@@ -5530,8 +5687,8 @@ function Dashboard() {
 
           criteriaCounts.ALL++;
           const act = (['RUPTURA', 'REPOSIÇÃO'].includes(statusSignal) || (suggestedPurchase > 0 && statusSignal === 'SAUDÁVEL')) && r.total_mov > 0;
-          if (act) { if (hasTransfer) criteriaCounts.TRANSFERENCIA++; else criteriaCounts.COMPRA++; }
-          else if (transferDirection === 'SAIDA') criteriaCounts.TRANSFERENCIA++;
+          if (act) criteriaCounts.COMPRA++;
+          if (transferDirection === 'SAIDA') criteriaCounts.TRANSFERENCIA++;
           if (statusSignal === 'RUPTURA') criteriaCounts.URGENTE++;
           if (statusSignal === 'REPOSIÇÃO') criteriaCounts.COMPRAR_JA++;
           if (suggestedPurchase > 0 && statusSignal === 'SAUDÁVEL') criteriaCounts.COMPRAR_BREVE++;
@@ -5565,8 +5722,8 @@ function Dashboard() {
       return {
         inventory: {
           filtered: normSearch 
-            ? processedBase.sort((a, b) => b._searchScore - a._searchScore)
-            : processedBase,
+            ? processedBase.sort((a, b) => b._searchScore - a._searchScore || (a.desc || '').localeCompare(b.desc || '', 'pt-BR', { sensitivity: 'base' }))
+            : processedBase.sort((a, b) => (a.desc || '').localeCompare(b.desc || '', 'pt-BR', { sensitivity: 'base' })),
           counts: criteriaCounts,
           critDistribution: Object.entries(criteriaCounts).filter(([n]) => !['ALL', 'COMPRA', 'TRANSFERENCIA'].includes(n)).map(([name, value]) => ({ name, value })),
           abcData: Object.entries(abcMetrics).map(([name, data]) => ({ name, items: data.items, mov: data.mov })),

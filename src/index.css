@@ -74,9 +74,25 @@
 }
 
 @layer base {
-  body {
-    @apply bg-brand-bg text-brand-text-primary font-sans antialiased selection:bg-brand-blue/30 selection:text-white transition-colors duration-300;
+  /* Ativa transição ultra-fluida em todos os elementos somente no momento da troca de tema */
+  .theme-transitioning,
+  .theme-transitioning * {
+    transition-property: background-color, border-color, color, fill, stroke, box-shadow, text-decoration-color;
+    transition-duration: 500ms !important;
+    transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1) !important;
   }
+
+  body {
+    @apply bg-brand-bg text-brand-text-primary font-sans antialiased selection:bg-brand-blue/30 selection:text-white;
+    transition: background-color 200ms ease, color 200ms ease;
+  }
+}
+
+/* Suporte para transição de tela inteira (View Transitions API) em navegadores modernos */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 400ms;
+  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 @layer utilities {
