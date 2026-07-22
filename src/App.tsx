@@ -2032,24 +2032,22 @@ function InventoryDashboardView({
 
   const clearCartByMode = () => {
     const isTransferMode = viewMode === 'transfers';
-    const confirmMsg = isTransferMode 
-      ? 'Deseja realmente remover todos os itens desta lista de transferência?' 
-      : 'Deseja realmente remover todos os itens desta lista de compras?';
-    
-    if (confirm(confirmMsg)) {
-      setCartItems(prev => {
-        const newCart = { ...prev };
-        Object.entries(newCart).forEach(([key, value]: [string, any]) => {
-          const isTransferItem = value.sourceFilial && value.sourceFilial !== value.item.filial.split(' - ')[0];
-          if (isTransferMode && isTransferItem) {
-            delete newCart[key];
-          } else if (!isTransferMode && !isTransferItem) {
-            delete newCart[key];
-          }
-        });
-        return newCart;
+    setCartItems(prev => {
+      const newCart = { ...prev };
+      Object.entries(newCart).forEach(([key, value]: [string, any]) => {
+        if (!value || !value.item) return;
+        const itemBranch = getBranchId(value.item.filial || '');
+        const sourceBranch = value.sourceFilial ? getBranchId(value.sourceFilial) : itemBranch;
+        const isTransferItem = sourceBranch !== itemBranch;
+        
+        if (isTransferMode && isTransferItem) {
+          delete newCart[key];
+        } else if (!isTransferMode && !isTransferItem) {
+          delete newCart[key];
+        }
       });
-    }
+      return newCart;
+    });
   };
 
   const processAllTransfers = () => {
@@ -2129,14 +2127,13 @@ function InventoryDashboardView({
   };
 
   const { purchaseItems, transferItems } = useMemo(() => {
-    if (viewMode !== 'purchases' && viewMode !== 'transfers') return { purchaseItems: [], transferItems: [] };
-    
-    // items that were MANUALLY added to the cart
     const itemsInCart = Object.entries(cartItems) as [string, { item: any, qty: number, sourceFilial?: string, reason?: string }][];
 
     const pItems = itemsInCart.filter(([key, value]) => {
-      const myFilial = value.item.filial.split(' - ')[0];
-      return value.sourceFilial === myFilial;
+      if (!value || !value.item) return false;
+      const myFilial = getBranchId(value.item.filial);
+      const srcFilial = value.sourceFilial ? getBranchId(value.sourceFilial) : myFilial;
+      return srcFilial === myFilial;
     }).map(([key, value]) => ({ 
       ...value.item, 
       desiredQty: value.qty, 
@@ -2145,15 +2142,18 @@ function InventoryDashboardView({
     })).sort((a: any, b: any) => (a.desc || '').localeCompare(b.desc || '', 'pt-BR', { sensitivity: 'base' }));
 
     const tItems = itemsInCart.filter(([key, value]) => {
-      const myFilial = value.item.filial.split(' - ')[0];
-      return value.sourceFilial && value.sourceFilial !== myFilial;
+      if (!value || !value.item) return false;
+      const myFilial = getBranchId(value.item.filial);
+      const srcFilial = value.sourceFilial ? getBranchId(value.sourceFilial) : myFilial;
+      return srcFilial !== myFilial;
     }).map(([key, value]) => {
+      const myFilialId = getBranchId(value.item.filial);
       const options = (transferableMap[value.item.cod] || [])
-        .filter((opt: any) => opt.filial !== value.item.filial.split(' - ')[0] && opt.saldo > 0)
+        .filter((opt: any) => getBranchId(opt.filial) !== myFilialId && opt.saldo > 0)
         .sort((a: any, b: any) => b.saldo - a.saldo);
       
       const chosenSource = value.sourceFilial || options[0]?.filial || '?';
-      const sourceData = options.find(o => o.filial === chosenSource);
+      const sourceData = options.find(o => getBranchId(o.filial) === getBranchId(chosenSource));
 
       return { 
         ...value.item, 
@@ -2166,7 +2166,7 @@ function InventoryDashboardView({
     }).sort((a: any, b: any) => (a.desc || '').localeCompare(b.desc || '', 'pt-BR', { sensitivity: 'base' }));
     
     return { purchaseItems: pItems, transferItems: tItems };
-  }, [viewMode, cartItems, transferableMap]);
+  }, [cartItems, transferableMap]);
 
   // Group transfer items by destination filial
   const groupedTransfers = useMemo(() => {
@@ -3124,7 +3124,7 @@ function InventoryDashboardView({
                                   </td>
                                   <td className="px-4 py-3 text-center">
                                     <button 
-                                      onClick={() => removeFromCart(`${r.cod}-${r.filial}`)}
+                                      onClick={() => removeFromCart(r.cartKey || `${r.cod}-${r.filial}`)}
                                       className="p-1.5 bg-brand-red/10 text-brand-red rounded border border-brand-red/20 hover:bg-brand-red hover:text-white transition-all shadow-sm"
                                     >
                                       <X className="w-3 h-3" />
@@ -5218,7 +5218,7 @@ function Dashboard() {
 
         autoTable(doc, {
           startY: currentY,
-          head: [['CÓDIGO', 'PRODUTO', 'GRUPO', 'CURVA', 'SALDO ORIGEM', 'SALDO DESTINO', 'RECOMENDADO', 'DESEJADO', 'STATUS']],
+          head: [['CÓDIGO', 'PRODUTO', 'GRUPO', 'CURVA', 'SALDO ORIGEM', 'SALDO DESTINO', 'DESEJADO', 'STATUS']],
           body: groupItems.map(r => [
             r.cod, 
             r.desc, 
@@ -5226,7 +5226,6 @@ function Dashboard() {
             r.curva,
             r.sourceSaldo || 0, 
             r.saldo, 
-            r.recommendedTransferQty || 0, 
             r.desiredQty || 0, 
             (r.transferStatusLabel || 'OK').replace('Parcial', 'Parcial').replace('TRANSF. INSUF.', 'Transferência Insuficiente')
           ]),
@@ -5235,14 +5234,13 @@ function Dashboard() {
           styles: { fontSize: 6, cellPadding: 1.5, halign: 'center' },
           columnStyles: { 
             0: { cellWidth: 15 },
-            1: { cellWidth: 55, halign: 'left' },
-            2: { cellWidth: 30, halign: 'left' },
-            3: { cellWidth: 10 },
-            4: { cellWidth: 20 },
-            5: { cellWidth: 20 },
-            6: { cellWidth: 35 },
-            7: { cellWidth: 35 },
-            8: { cellWidth: 35 }
+            1: { cellWidth: 65, halign: 'left' },
+            2: { cellWidth: 35, halign: 'left' },
+            3: { cellWidth: 12 },
+            4: { cellWidth: 22 },
+            5: { cellWidth: 22 },
+            6: { cellWidth: 25 },
+            7: { cellWidth: 35 }
           }
         });
         currentY = (doc as any).lastAutoTable.finalY + 12;
