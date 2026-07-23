@@ -2183,14 +2183,20 @@ function InventoryDashboardView({
   }, [transferItems]);
 
   const groupedPurchases = useMemo(() => {
-    const groups: Record<string, any[]> = {};
+    const groups: Record<string, Record<string, any[]>> = {};
     purchaseItems.forEach(item => {
       const vendor = item.fab || 'NÃO INFORMADO';
-      if (!groups[vendor]) groups[vendor] = [];
-      groups[vendor].push(item);
+      const branch = item.filial ? item.filial.split(' - ')[0] : 'GERAL';
+      if (!groups[vendor]) groups[vendor] = {};
+      if (!groups[vendor][branch]) groups[vendor][branch] = [];
+      groups[vendor][branch].push(item);
     });
-    Object.keys(groups).forEach(k => {
-      groups[k].sort((a: any, b: any) => (a.desc || '').localeCompare(b.desc || '', 'pt-BR', { sensitivity: 'base' }));
+    Object.keys(groups).forEach(vendor => {
+      Object.keys(groups[vendor]).forEach(branch => {
+        groups[vendor][branch].sort((a: any, b: any) =>
+          (a.desc || '').localeCompare(b.desc || '', 'pt-BR', { sensitivity: 'base' })
+        );
+      });
     });
     return groups;
   }, [purchaseItems]);
@@ -3070,73 +3076,97 @@ function InventoryDashboardView({
                       <p className="text-[10px] mt-2 max-w-[250px]">Adicione itens na aba operacional ou use a inteligência para reposição.</p>
                     </div>
                   ) : (
-                    (Object.entries(groupedPurchases) as [string, any[]][]).map(([vendor, items]) => (
-                      <div key={vendor} className="bg-brand-bg/50 dark:bg-black/40 border border-brand-border/30 dark:border-white/5 rounded-3xl overflow-hidden hover:border-brand-red/30 transition-all shadow-sm">
-                        <div className="px-6 py-3 bg-brand-red/5 border-b border-brand-border/30 flex items-center justify-between">
-                          <div className="flex items-center gap-3">
-                            <div className="w-8 h-8 bg-brand-red/10 rounded-xl flex items-center justify-center border border-brand-red/20 shadow-sm">
-                              <Factory className="w-4 h-4 text-brand-red" />
+                    (Object.entries(groupedPurchases) as [string, Record<string, any[]>][]).map(([vendor, branchMap]) => {
+                      const totalVendorItems = Object.values(branchMap).reduce((acc, items) => acc + items.length, 0);
+                      const branchCount = Object.keys(branchMap).length;
+
+                      return (
+                        <div key={vendor} className="bg-white dark:bg-brand-card border border-brand-border/40 dark:border-white/10 rounded-3xl overflow-hidden hover:border-brand-red/30 transition-all shadow-sm">
+                          {/* Vendor Header */}
+                          <div className="px-6 py-3.5 bg-brand-red/5 border-b border-brand-border/30 flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 bg-brand-red/10 rounded-xl flex items-center justify-center border border-brand-red/20 shadow-sm">
+                                <Factory className="w-4 h-4 text-brand-red" />
+                              </div>
+                              <div>
+                                <h4 className="text-[11px] font-black text-brand-text-primary uppercase tracking-tight">Fornecedor: {vendor}</h4>
+                                <p className="text-[9px] text-brand-text-secondary font-bold opacity-60 uppercase">
+                                  {totalVendorItems} {totalVendorItems === 1 ? 'item' : 'itens'} para pedido • {branchCount} {branchCount === 1 ? 'filial' : 'filiais'}
+                                </p>
+                              </div>
                             </div>
-                            <div>
-                              <h4 className="text-[11px] font-black text-brand-text-primary uppercase tracking-tight">Fornecedor: {vendor}</h4>
-                              <p className="text-[9px] text-brand-text-secondary font-bold opacity-60 uppercase">{items.length} itens para pedido</p>
+                            <div className="px-2.5 py-1 rounded-lg bg-brand-red/10 border border-brand-red/20 text-brand-red text-[8px] font-black uppercase tracking-widest">
+                              Pendente
                             </div>
                           </div>
-                          <div className="px-2.5 py-1 rounded-lg bg-brand-red/10 border border-brand-red/20 text-brand-red text-[8px] font-black uppercase tracking-widest">
-                            Pendente
+                          
+                          {/* Branch Sub-sections */}
+                          <div className="p-4 space-y-4">
+                            {Object.entries(branchMap).map(([branch, branchItems]) => (
+                              <div key={branch} className="rounded-2xl border border-brand-border/30 dark:border-white/5 bg-black/[0.01] dark:bg-white/[0.01] overflow-hidden">
+                                {/* Filial Sub-Header */}
+                                <div className="px-4 py-2.5 bg-brand-blue/5 border-b border-brand-border/20 flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <Building2 className="w-3.5 h-3.5 text-brand-blue" />
+                                    <span className="text-[10px] font-black text-brand-text-primary uppercase tracking-wider">
+                                      FILIAL: {branch}
+                                    </span>
+                                  </div>
+                                  <span className="px-2 py-0.5 rounded-md bg-brand-blue/10 border border-brand-blue/20 text-brand-blue text-[8px] font-black uppercase tracking-widest">
+                                    {branchItems.length} {branchItems.length === 1 ? 'item' : 'itens'}
+                                  </span>
+                                </div>
+
+                                {/* Items Table for this Filial */}
+                                <table className="w-full text-left border-collapse">
+                                  <thead>
+                                    <tr className="bg-black/[0.02] dark:bg-white/[0.02]">
+                                      <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10">Item</th>
+                                      <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10 text-center font-mono">Saldo</th>
+                                      <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10 text-center font-mono">Reposição</th>
+                                      <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10 text-center">Origem</th>
+                                      <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10 text-center">Ação</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-brand-border/20 dark:divide-white/5">
+                                    {branchItems.map((r: any, idx: number) => (
+                                      <tr key={`${r.cod}-${r.filial}-${idx}`} className="hover:bg-brand-hover/40 transition-colors group">
+                                        <td className="px-4 py-2.5">
+                                          <div className="text-[10px] font-black text-brand-text-primary uppercase group-hover:text-brand-blue transition-colors line-clamp-1 truncate max-w-[220px]">{r.desc}</div>
+                                          <div className="text-[8px] font-mono text-brand-text-secondary opacity-60">#{r.cod}</div>
+                                        </td>
+                                        <td className="px-4 py-2.5 text-center">
+                                          <div className="text-[11px] font-black text-brand-text-primary">{r.saldo.toLocaleString()}</div>
+                                          <div className="text-[8px] font-mono text-brand-text-secondary opacity-40 uppercase">{r.un}</div>
+                                        </td>
+                                        <td className="px-4 py-2.5 text-center">
+                                          <div className="text-[11px] font-black text-brand-red">{r.desiredQty?.toLocaleString()}</div>
+                                          <div className="text-[8px] font-mono text-brand-red/50 uppercase">Sug: {r.suggestedPurchase.toLocaleString()}</div>
+                                        </td>
+                                        <td className="px-4 py-2.5 text-center">
+                                          <div className={`px-2 py-0.5 inline-block rounded text-[7px] font-black uppercase tracking-widest ${r.originReason?.includes('insuficiente') ? 'bg-orange-100 text-orange-600 border border-orange-200' : 'bg-brand-red/10 text-brand-red border border-brand-red/20'}`}>
+                                            {r.originReason || r.statusSignal || 'Ruptura'}
+                                          </div>
+                                        </td>
+                                        <td className="px-4 py-2.5 text-center">
+                                          <button 
+                                            onClick={() => removeFromCart(r.cartKey || `${r.cod}-${r.filial}`)}
+                                            className="p-1.5 bg-brand-red/10 text-brand-red rounded border border-brand-red/20 hover:bg-brand-red hover:text-white transition-all shadow-sm"
+                                            title="Remover item"
+                                          >
+                                            <X className="w-3 h-3" />
+                                          </button>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            ))}
                           </div>
                         </div>
-                        
-                        <div className="p-4">
-                          <table className="w-full text-left border-collapse">
-                            <thead>
-                              <tr>
-                                <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10">Item</th>
-                                <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10 text-center">Filial</th>
-                                <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10 text-center font-mono">Saldo</th>
-                                <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10 text-center font-mono">Reposição</th>
-                                <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10 text-center">Origem</th>
-                                <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10 text-center">Ação</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-brand-border/30 dark:divide-white/5">
-                              {items.map((r: any, idx: number) => (
-                                <tr key={`${r.cod}-${r.filial}-${idx}`} className="hover:bg-brand-hover/40 transition-colors group">
-                                  <td className="px-4 py-3">
-                                    <div className="text-[10px] font-black text-brand-text-primary uppercase group-hover:text-brand-blue transition-colors line-clamp-1 truncate max-w-[180px]">{r.desc}</div>
-                                    <div className="text-[8px] font-mono text-brand-text-secondary opacity-60">#{r.cod}</div>
-                                  </td>
-                                  <td className="px-4 py-3 text-center">
-                                    <div className="text-[9px] font-black text-brand-text-secondary uppercase">{r.filial.split(' - ')[0]}</div>
-                                  </td>
-                                  <td className="px-4 py-3 text-center">
-                                    <div className="text-[11px] font-black text-brand-text-primary">{r.saldo.toLocaleString()}</div>
-                                    <div className="text-[8px] font-mono text-brand-text-secondary opacity-40 uppercase">{r.un}</div>
-                                  </td>
-                                  <td className="px-4 py-3 text-center">
-                                    <div className="text-[11px] font-black text-brand-red">{r.desiredQty?.toLocaleString()}</div>
-                                    <div className="text-[8px] font-mono text-brand-red/50 uppercase">Sug: {r.suggestedPurchase.toLocaleString()}</div>
-                                  </td>
-                                  <td className="px-4 py-3 text-center">
-                                    <div className={`px-2 py-0.5 inline-block rounded text-[7px] font-black uppercase tracking-widest ${r.originReason?.includes('insuficiente') ? 'bg-orange-100 text-orange-600 border border-orange-200' : 'bg-brand-red/10 text-brand-red border border-brand-red/20'}`}>
-                                      {r.originReason || r.statusSignal || 'Ruptura'}
-                                    </div>
-                                  </td>
-                                  <td className="px-4 py-3 text-center">
-                                    <button 
-                                      onClick={() => removeFromCart(r.cartKey || `${r.cod}-${r.filial}`)}
-                                      className="p-1.5 bg-brand-red/10 text-brand-red rounded border border-brand-red/20 hover:bg-brand-red hover:text-white transition-all shadow-sm"
-                                    >
-                                      <X className="w-3 h-3" />
-                                    </button>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
               </div>
@@ -3198,7 +3228,7 @@ function InventoryDashboardView({
                     </div>
                   ) : (
                     (Object.entries(groupedTransfers) as [string, any[]][]).map(([destBranch, items]) => (
-                      <div key={destBranch} className="bg-brand-bg/50 dark:bg-black/40 border border-brand-border/30 dark:border-white/5 rounded-3xl overflow-hidden hover:border-brand-green/30 transition-all shadow-sm">
+                      <div key={destBranch} className="bg-white dark:bg-brand-card border border-brand-border/40 dark:border-white/10 rounded-3xl overflow-hidden hover:border-brand-green/30 transition-all shadow-sm">
                         <div className="px-6 py-4 bg-brand-green/5 border-b border-brand-border/30 flex items-center justify-between">
                           <div className="flex items-center gap-3">
                             <div className="w-8 h-8 bg-brand-green/10 rounded-xl flex items-center justify-center border border-brand-green/20">
@@ -5852,17 +5882,14 @@ function Dashboard() {
               <div className="w-16 h-16 bg-brand-blue rounded-2xl flex items-center justify-center mb-6 shadow-xl shadow-brand-blue/20 animate-float">
                 <LayoutDashboard className="text-white w-8 h-8" />
               </div>
-              <h1 className="text-4xl font-black tracking-tight mb-2 uppercase italic text-brand-text-primary dark:text-white">Selecione o Dashboard</h1>
-              <p className="text-brand-text-secondary max-w-md mb-12 font-mono text-[10px] uppercase tracking-widest opacity-60">
-                O CORTEX ADAPTARÁ OS INDICADORES PARA O CONTEXTO SELECIONADO.
-              </p>
+              <h1 className="text-4xl font-black tracking-tight mb-12 uppercase italic text-black dark:text-white font-sans">SELECIONE A DASHBOARD</h1>
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-8 w-full max-w-6xl px-4">
                 <DashboardOption 
                   onClick={() => { setAppMode('purchases'); setScreen('upload'); }}
                   icon={<TrendingDown className="text-brand-blue w-12 h-12" />}
                   label="FINANCEIRO"
-                  title="Dashboard Compras"
+                  title="DASHBOARD COMPRAS"
                   description="Análise profunda de fornecedores, redução de custos e otimização do mix."
                   accent="blue"
                   subIcon={<ShoppingCart className="w-32 h-32" />}
@@ -5874,7 +5901,7 @@ function Dashboard() {
                   }}
                   icon={<AlertCircle className="text-brand-yellow w-12 h-12" />}
                   label="LOGÍSTICA"
-                  title="Produtos em Falta"
+                  title="PRODUTOS EM FALTA"
                   description="Monitoramento inteligente de ruptura, excesso e sugestão de compras automático."
                   accent="yellow"
                   subIcon={<PackageSearch className="w-32 h-32" />}
@@ -5883,7 +5910,7 @@ function Dashboard() {
                   onClick={() => { setAppMode('sales'); setScreen('upload'); }}
                   icon={<TrendingUp className="text-brand-green w-12 h-12" />}
                   label="COMERCIAL"
-                  title="Dashboard Vendas"
+                  title="DASHBOARD VENDAS"
                   description="Gestão estratégica de faturamento, canais e performance de produtos."
                   accent="green"
                   subIcon={<BarChart3 className="w-32 h-32" />}
@@ -6877,10 +6904,10 @@ function AppContent() {
 }
 
 function DashboardOption({ onClick, icon, label, title, description, accent, subIcon }: { onClick: () => void, icon: React.ReactNode, label: string, title: string, description: string, accent: 'blue' | 'yellow' | 'green', subIcon: React.ReactNode }) {
-  const shadowGlow = {
-    blue: 'hover:border-brand-blue/40 hover:shadow-brand-blue/10 hover:shadow-2xl dark:hover:shadow-brand-blue/5',
-    yellow: 'hover:border-brand-yellow/40 hover:shadow-brand-yellow/10 hover:shadow-2xl dark:hover:shadow-brand-yellow/5',
-    green: 'hover:border-brand-green/40 hover:shadow-brand-green/10 hover:shadow-2xl dark:hover:shadow-brand-green/5'
+  const cardBorderAndShadow = {
+    blue: 'border-slate-200 dark:border-slate-800/80 hover:border-brand-blue dark:hover:border-brand-blue hover:shadow-2xl hover:shadow-brand-blue/15',
+    yellow: 'border-slate-200 dark:border-slate-800/80 hover:border-brand-yellow dark:hover:border-brand-yellow hover:shadow-2xl hover:shadow-brand-yellow/15',
+    green: 'border-slate-200 dark:border-slate-800/80 hover:border-brand-green dark:hover:border-brand-green hover:shadow-2xl hover:shadow-brand-green/15'
   };
 
   const labelColors = {
@@ -6892,8 +6919,13 @@ function DashboardOption({ onClick, icon, label, title, description, accent, sub
   return (
     <button 
       onClick={onClick}
-      className={`group relative p-10 bg-brand-card dark:bg-brand-card/30 border border-brand-border dark:border-white/5 rounded-[2.5rem] transition-all text-left overflow-hidden shadow-lg hover:scale-[1.02] duration-300 ${shadowGlow[accent]}`}
+      className={`group relative p-10 bg-white dark:bg-[#101524] border-2 rounded-[2rem] transition-all text-left overflow-hidden shadow-lg hover:-translate-y-1 duration-300 ${cardBorderAndShadow[accent]}`}
     >
+      <div className={`absolute top-0 left-0 right-0 h-1.5 transition-all duration-300 ${
+        accent === 'blue' ? 'bg-brand-blue' :
+        accent === 'yellow' ? 'bg-brand-yellow' :
+        'bg-brand-green'
+      }`} />
       <div className={`absolute -right-4 -bottom-4 p-4 opacity-[0.03] dark:opacity-[0.06] transition-all transform group-hover:scale-125 group-hover:-translate-x-2 group-hover:-translate-y-2 duration-700 pointer-events-none ${
         accent === 'blue' ? 'text-brand-blue' :
         accent === 'yellow' ? 'text-brand-yellow' :
@@ -6909,7 +6941,7 @@ function DashboardOption({ onClick, icon, label, title, description, accent, sub
         {icon}
       </div>
       <div className={`text-[10px] font-black uppercase tracking-[0.4em] mb-4 font-mono ${labelColors[accent]}`}>{label}</div>
-      <h3 className="text-2xl font-black mb-3 text-brand-text-primary dark:text-white tracking-tight leading-tight group-hover:translate-x-1 transition-transform">
+      <h3 className="text-2xl font-black mb-3 text-black dark:text-white tracking-tight leading-tight group-hover:translate-x-1 transition-transform">
         {title}
       </h3>
       <p className="text-[12px] text-brand-text-secondary leading-relaxed font-semibold opacity-90 group-hover:opacity-100 transition-opacity">
