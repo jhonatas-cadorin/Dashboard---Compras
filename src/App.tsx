@@ -2030,6 +2030,20 @@ function InventoryDashboardView({
     });
   };
 
+  const updateCartQty = (key: string, newQty: number) => {
+    const val = Math.max(1, newQty || 1);
+    setCartItems(prev => {
+      if (!prev[key]) return prev;
+      return {
+        ...prev,
+        [key]: {
+          ...prev[key],
+          qty: val
+        }
+      };
+    });
+  };
+
   const clearCartByMode = () => {
     const isTransferMode = viewMode === 'transfers';
     setCartItems(prev => {
@@ -3140,8 +3154,32 @@ function InventoryDashboardView({
                                           <div className="text-[8px] font-mono text-brand-text-secondary opacity-40 uppercase">{r.un}</div>
                                         </td>
                                         <td className="px-4 py-2.5 text-center">
-                                          <div className="text-[11px] font-black text-brand-red">{r.desiredQty?.toLocaleString()}</div>
-                                          <div className="text-[8px] font-mono text-brand-red/50 uppercase">Sug: {r.suggestedPurchase.toLocaleString()}</div>
+                                          <div className="flex items-center justify-center gap-1">
+                                            <button
+                                              type="button"
+                                              onClick={() => updateCartQty(r.cartKey || `${r.cod}-${r.filial}`, Math.max(1, (r.desiredQty || 1) - 1))}
+                                              className="w-5 h-5 rounded bg-brand-red/10 text-brand-red font-black text-xs hover:bg-brand-red hover:text-white transition-all flex items-center justify-center border border-brand-red/20 active:scale-95 cursor-pointer"
+                                              title="Diminuir quantidade"
+                                            >
+                                              -
+                                            </button>
+                                            <input 
+                                              type="number"
+                                              min={1}
+                                              value={r.desiredQty || 1}
+                                              onChange={(e) => updateCartQty(r.cartKey || `${r.cod}-${r.filial}`, parseInt(e.target.value) || 1)}
+                                              className="w-16 text-center text-[11px] font-black text-brand-red bg-brand-bg/60 dark:bg-black/50 border border-brand-red/30 rounded-lg py-0.5 px-1 focus:outline-none focus:ring-1 focus:ring-brand-red"
+                                            />
+                                            <button
+                                              type="button"
+                                              onClick={() => updateCartQty(r.cartKey || `${r.cod}-${r.filial}`, (r.desiredQty || 0) + 1)}
+                                              className="w-5 h-5 rounded bg-brand-red/10 text-brand-red font-black text-xs hover:bg-brand-red hover:text-white transition-all flex items-center justify-center border border-brand-red/20 active:scale-95 cursor-pointer"
+                                              title="Aumentar quantidade"
+                                            >
+                                              +
+                                            </button>
+                                          </div>
+                                          <div className="text-[8px] font-mono text-brand-red/50 uppercase mt-0.5">Sug: {r.suggestedPurchase.toLocaleString()}</div>
                                         </td>
                                         <td className="px-4 py-2.5 text-center">
                                           <div className={`px-2 py-0.5 inline-block rounded text-[7px] font-black uppercase tracking-widest ${r.originReason?.includes('insuficiente') ? 'bg-orange-100 text-orange-600 border border-orange-200' : 'bg-brand-red/10 text-brand-red border border-brand-red/20'}`}>
@@ -3271,7 +3309,31 @@ function InventoryDashboardView({
                                     </button>
                                   </td>
                                   <td className="px-4 py-3 text-center">
-                                    <div className="text-[11px] font-black text-brand-green">{r.desiredQty?.toLocaleString()}</div>
+                                    <div className="flex items-center justify-center gap-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => updateCartQty(r.cartKey || `${r.cod}-${r.filial}`, Math.max(1, (r.desiredQty || 1) - 1))}
+                                        className="w-5 h-5 rounded bg-brand-green/10 text-brand-green font-black text-xs hover:bg-brand-green hover:text-white transition-all flex items-center justify-center border border-brand-green/20 active:scale-95 cursor-pointer"
+                                        title="Diminuir quantidade"
+                                      >
+                                        -
+                                      </button>
+                                      <input 
+                                        type="number"
+                                        min={1}
+                                        value={r.desiredQty || 1}
+                                        onChange={(e) => updateCartQty(r.cartKey || `${r.cod}-${r.filial}`, parseInt(e.target.value) || 1)}
+                                        className="w-16 text-center text-[11px] font-black text-brand-green bg-brand-bg/60 dark:bg-black/50 border border-brand-green/30 rounded-lg py-0.5 px-1 focus:outline-none focus:ring-1 focus:ring-brand-green"
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => updateCartQty(r.cartKey || `${r.cod}-${r.filial}`, (r.desiredQty || 0) + 1)}
+                                        className="w-5 h-5 rounded bg-brand-green/10 text-brand-green font-black text-xs hover:bg-brand-green hover:text-white transition-all flex items-center justify-center border border-brand-green/20 active:scale-95 cursor-pointer"
+                                        title="Aumentar quantidade"
+                                      >
+                                        +
+                                      </button>
+                                    </div>
                                   </td>
                                   <td className="px-4 py-3 text-center">
                                     <button 
@@ -5139,60 +5201,68 @@ function Dashboard() {
     let dataToExport: any[] = [];
 
     if (isTrans) {
-      const tGroups: Record<string, any[]> = {};
+      // Transferências: Agrupar por Núcleo Destino e Núcleo Origem
+      const tGroups: Record<string, Record<string, any[]>> = {};
       items.forEach(item => {
-        const source = item.sourceFilial || 'REDE';
-        const dest = item.filial.split(' - ')[0];
-        const key = `${source} -> ${dest}`;
-        if (!tGroups[key]) tGroups[key] = [];
-        tGroups[key].push(item);
+        const source = item.sourceFilial ? item.sourceFilial.split(' - ')[0] : 'REDE';
+        const dest = item.filial ? item.filial.split(' - ')[0] : 'GERAL';
+        if (!tGroups[dest]) tGroups[dest] = {};
+        if (!tGroups[dest][source]) tGroups[dest][source] = [];
+        tGroups[dest][source].push(item);
       });
 
-      Object.entries(tGroups).forEach(([groupName, groupItems]) => {
-        groupItems.forEach(r => {
-          dataToExport.push({
-            'Agrupamento': groupName,
-            'Código': r.cod,
-            'Produto': r.desc,
-            'Grupo': r.grupo,
-            'Curva': r.curva,
-            'Unidade': expandUnitAbbreviation(r.un),
-            'Filial Origem': r.sourceFilial,
-            'Saldo Origem': r.sourceSaldo || 0,
-            'Filial Destino': r.filial.split(' - ')[0],
-            'Saldo Destino': r.saldo,
-            'Quantidade Recomendada': r.recommendedTransferQty || 0,
-            'Quantidade Desejada': r.desiredQty || 0,
-            'Status': (r.transferStatusLabel || 'Transferível').replace('Parcial', 'Parcial').replace('TRANSF. INSUF.', 'Transferência Insuficiente'),
-            'Observação': r.transferJustification || '',
-            'Compra Complementar': r.transferStatusLabel?.includes('Compra') ? 'SIM' : 'NÃO'
+      Object.entries(tGroups).forEach(([dest, sourceMap]) => {
+        Object.entries(sourceMap).forEach(([source, groupItems]) => {
+          groupItems.forEach(r => {
+            dataToExport.push({
+              'Núcleo Destino': dest,
+              'Núcleo Origem': source,
+              'Agrupamento': `DESTINO: ${dest} | ORIGEM: ${source}`,
+              'Código': r.cod,
+              'Produto': r.desc,
+              'Grupo': r.grupo || '',
+              'Curva': r.curva || '',
+              'Unidade': expandUnitAbbreviation(r.un),
+              'Saldo Origem': r.sourceSaldo || 0,
+              'Saldo Destino': r.saldo || 0,
+              'Quantidade Recomendada': r.recommendedTransferQty || 0,
+              'Quantidade Desejada': r.desiredQty || 0,
+              'Status': (r.transferStatusLabel || 'Transferível').replace('Parcial', 'Parcial').replace('TRANSF. INSUF.', 'Transferência Insuficiente'),
+              'Observação': r.transferJustification || '',
+              'Compra Complementar': r.transferStatusLabel?.includes('Compra') ? 'SIM' : 'NÃO'
+            });
           });
         });
       });
     } else {
-      // Purchases - Agrupar por Fornecedor (r.fab)
-      const pGroups: Record<string, any[]> = {};
+      // Purchases - Agrupar por Fornecedor (r.fab) e depois por Filial/Núcleo
+      const pGroups: Record<string, Record<string, any[]>> = {};
       items.forEach(item => {
         const vendor = item.fab || 'NÃO INFORMADO';
-        if (!pGroups[vendor]) pGroups[vendor] = [];
-        pGroups[vendor].push(item);
+        const branch = item.filial ? item.filial.split(' - ')[0] : 'GERAL';
+        if (!pGroups[vendor]) pGroups[vendor] = {};
+        if (!pGroups[vendor][branch]) pGroups[vendor][branch] = [];
+        pGroups[vendor][branch].push(item);
       });
 
-      Object.entries(pGroups).forEach(([vendor, groupItems]) => {
-        groupItems.forEach(r => {
-          dataToExport.push({
-            'Fornecedor': vendor,
-            'Código': r.cod,
-            'Produto': r.desc,
-            'Filial': r.filial.split(' - ')[0],
-            'Unidade': expandUnitAbbreviation(r.un),
-            'Saldo Atual': r.saldo,
-            'Quantidade Sugerida': r.suggestedPurchase,
-            'Quantidade Desejada': r.desiredQty,
-            'Quantidade Aprovada': r.desiredQty,
-            'Origem da Necessidade': r.transferStatusLabel?.includes('Parcial') ? 'Transferência Insuficiente' : r.statusSignal || 'Ruptura',
-            'Curva': r.curva,
-            'Status': r.statusSignal
+      Object.entries(pGroups).forEach(([vendor, branchMap]) => {
+        Object.entries(branchMap).forEach(([branch, groupItems]) => {
+          groupItems.forEach(r => {
+            dataToExport.push({
+              'Fornecedor': vendor,
+              'Filial / Núcleo': branch,
+              'Agrupamento': `FORNECEDOR: ${vendor} | FILIAL: ${branch}`,
+              'Código': r.cod,
+              'Produto': r.desc,
+              'Unidade': expandUnitAbbreviation(r.un),
+              'Saldo Atual': r.saldo || 0,
+              'Quantidade Sugerida': r.suggestedPurchase || 0,
+              'Quantidade Desejada': r.desiredQty || 0,
+              'Quantidade Aprovada': r.desiredQty || 0,
+              'Origem da Necessidade': r.transferStatusLabel?.includes('Parcial') ? 'Transferência Insuficiente' : r.statusSignal || 'Ruptura',
+              'Curva': r.curva || '',
+              'Status': r.statusSignal || 'Pendente'
+            });
           });
         });
       });
@@ -5211,7 +5281,7 @@ function Dashboard() {
     const drawHeader = () => {
       doc.setFillColor(15, 23, 42); 
       doc.rect(0, 0, 297, 25, 'F');
-      doc.setFontSize(20);
+      doc.setFontSize(18);
       doc.setTextColor(255, 255, 255);
       doc.text(`CORTEX - RELATÓRIO DE ${type.toUpperCase()}`, 14, 15);
       doc.setFontSize(8);
@@ -5223,102 +5293,114 @@ function Dashboard() {
     let currentY = 35;
 
     if (isTrans) {
-      const tGroups: Record<string, any[]> = {};
+      // Transferências: Agrupar por Núcleo Destino e Núcleo Origem
+      const tGroups: Record<string, Record<string, any[]>> = {};
       items.forEach(item => {
-        const source = item.sourceFilial || 'REDE';
-        const dest = item.filial.split(' - ')[0];
-        const key = `${source} -> ${dest}`;
-        if (!tGroups[key]) tGroups[key] = [];
-        tGroups[key].push(item);
+        const dest = item.filial ? item.filial.split(' - ')[0] : 'GERAL';
+        const source = item.sourceFilial ? item.sourceFilial.split(' - ')[0] : 'REDE';
+        if (!tGroups[dest]) tGroups[dest] = {};
+        if (!tGroups[dest][source]) tGroups[dest][source] = [];
+        tGroups[dest][source].push(item);
       });
 
-      Object.entries(tGroups).forEach(([groupName, groupItems], index) => {
-        if (currentY > 170) {
-           doc.addPage();
-           drawHeader();
-           currentY = 35;
-        }
-
-        doc.setFontSize(12);
-        doc.setTextColor(30, 41, 59);
-        doc.setFont('helvetica', 'bold');
-        doc.text(groupName, 14, currentY);
-        doc.setFont('helvetica', 'normal');
-        currentY += 6;
-
-        autoTable(doc, {
-          startY: currentY,
-          head: [['CÓDIGO', 'PRODUTO', 'GRUPO', 'CURVA', 'SALDO ORIGEM', 'SALDO DESTINO', 'DESEJADO', 'STATUS']],
-          body: groupItems.map(r => [
-            r.cod, 
-            r.desc, 
-            r.grupo,
-            r.curva,
-            r.sourceSaldo || 0, 
-            r.saldo, 
-            r.desiredQty || 0, 
-            (r.transferStatusLabel || 'OK').replace('Parcial', 'Parcial').replace('TRANSF. INSUF.', 'Transferência Insuficiente')
-          ]),
-          theme: 'grid',
-          headStyles: { fillColor: [59, 130, 246], textColor: [255, 255, 255], fontSize: 6, halign: 'center' },
-          styles: { fontSize: 6, cellPadding: 1.5, halign: 'center' },
-          columnStyles: { 
-            0: { cellWidth: 15 },
-            1: { cellWidth: 65, halign: 'left' },
-            2: { cellWidth: 35, halign: 'left' },
-            3: { cellWidth: 12 },
-            4: { cellWidth: 22 },
-            5: { cellWidth: 22 },
-            6: { cellWidth: 25 },
-            7: { cellWidth: 35 }
+      Object.entries(tGroups).forEach(([dest, sourceMap]) => {
+        Object.entries(sourceMap).forEach(([source, groupItems]) => {
+          if (currentY > 170) {
+             doc.addPage();
+             drawHeader();
+             currentY = 35;
           }
+
+          doc.setFontSize(11);
+          doc.setTextColor(16, 185, 129); // brand-green
+          doc.setFont('helvetica', 'bold');
+          doc.text(`FILIAL / NÚCLEO DESTINO: ${dest}  •  ORIGEM: ${source}`, 14, currentY);
+          doc.setFont('helvetica', 'normal');
+          currentY += 6;
+
+          autoTable(doc, {
+            startY: currentY,
+            head: [['CÓDIGO', 'PRODUTO', 'GRUPO', 'CURVA', 'SALDO ORIGEM', 'SALDO DESTINO', 'DESEJADO', 'STATUS']],
+            body: groupItems.map(r => [
+              r.cod, 
+              r.desc, 
+              r.grupo || '',
+              r.curva || '',
+              r.sourceSaldo || 0, 
+              r.saldo || 0, 
+              r.desiredQty || 0, 
+              (r.transferStatusLabel || 'OK').replace('Parcial', 'Parcial').replace('TRANSF. INSUF.', 'Transferência Insuficiente')
+            ]),
+            theme: 'grid',
+            headStyles: { fillColor: [16, 185, 129], textColor: [255, 255, 255], fontSize: 7, halign: 'center' },
+            styles: { fontSize: 7, cellPadding: 2, halign: 'center' },
+            columnStyles: { 
+              0: { cellWidth: 20 },
+              1: { cellWidth: 80, halign: 'left' },
+              2: { cellWidth: 35, halign: 'left' },
+              3: { cellWidth: 15 },
+              4: { cellWidth: 25 },
+              5: { cellWidth: 25 },
+              6: { cellWidth: 25 },
+              7: { cellWidth: 40 }
+            }
+          });
+          currentY = (doc as any).lastAutoTable.finalY + 10;
         });
-        currentY = (doc as any).lastAutoTable.finalY + 12;
       });
     } else {
-      const pGroups: Record<string, any[]> = {};
+      // Purchases: Agrupar por Fornecedor e depois por Filial / Núcleo
+      const pGroups: Record<string, Record<string, any[]>> = {};
       items.forEach(item => {
         const vendor = item.fab || 'NÃO INFORMADO';
-        if (!pGroups[vendor]) pGroups[vendor] = [];
-        pGroups[vendor].push(item);
+        const branch = item.filial ? item.filial.split(' - ')[0] : 'GERAL';
+        if (!pGroups[vendor]) pGroups[vendor] = {};
+        if (!pGroups[vendor][branch]) pGroups[vendor][branch] = [];
+        pGroups[vendor][branch].push(item);
       });
 
-      Object.entries(pGroups).forEach(([vendor, groupItems], index) => {
-        if (currentY > 170) {
-           doc.addPage();
-           drawHeader();
-           currentY = 35;
-        }
-
-        doc.setFontSize(11);
-        doc.setTextColor(220, 38, 38);
-        doc.setFont('helvetica', 'bold');
-        doc.text(`FORNECEDOR: ${vendor}`, 14, currentY);
-        doc.setFont('helvetica', 'normal');
-        currentY += 6;
-
-        autoTable(doc, {
-          startY: currentY,
-          head: [['CÓDIGO', 'PRODUTO', 'FILIAL', 'SALDO ATUAL', 'SUGESTÃO', 'QUANTIDADE COMPRA', 'ORIGEM DA NECESSIDADE']],
-          body: groupItems.map(r => [
-            r.cod, r.desc, r.filial.split(' - ')[0], r.saldo.toLocaleString(), 
-            r.suggestedPurchase.toLocaleString(), r.desiredQty?.toLocaleString(), 
-            r.transferStatusLabel?.includes('Parcial') ? 'TRANSFERÊNCIA INSUFICIENTE' : r.statusSignal || 'RUPTURA'
-          ]),
-          theme: 'grid',
-          headStyles: { fillColor: [220, 38, 38], textColor: [255, 255, 255], fontSize: 8, halign: 'center' },
-          styles: { fontSize: 8, cellPadding: 3, halign: 'center' },
-          columnStyles: { 
-            0: { cellWidth: 20 },
-            1: { cellWidth: 80, halign: 'left' },
-            2: { cellWidth: 25 },
-            3: { cellWidth: 25 },
-            4: { cellWidth: 25 },
-            5: { cellWidth: 35 },
-            6: { cellWidth: 45 }
+      Object.entries(pGroups).forEach(([vendor, branchMap]) => {
+        Object.entries(branchMap).forEach(([branch, groupItems]) => {
+          if (currentY > 170) {
+             doc.addPage();
+             drawHeader();
+             currentY = 35;
           }
+
+          doc.setFontSize(10);
+          doc.setTextColor(220, 38, 38);
+          doc.setFont('helvetica', 'bold');
+          doc.text(`FORNECEDOR: ${vendor}  •  FILIAL / NÚCLEO: ${branch}`, 14, currentY);
+          doc.setFont('helvetica', 'normal');
+          currentY += 6;
+
+          autoTable(doc, {
+            startY: currentY,
+            head: [['CÓDIGO', 'PRODUTO', 'FILIAL / NÚCLEO', 'SALDO ATUAL', 'SUGESTÃO', 'QTD. COMPRA', 'ORIGEM NECESSIDADE']],
+            body: groupItems.map(r => [
+              r.cod, 
+              r.desc, 
+              r.filial ? r.filial.split(' - ')[0] : 'GERAL', 
+              r.saldo.toLocaleString(), 
+              r.suggestedPurchase.toLocaleString(), 
+              r.desiredQty?.toLocaleString(), 
+              r.transferStatusLabel?.includes('Parcial') ? 'TRANSFERÊNCIA INSUFICIENTE' : r.statusSignal || 'RUPTURA'
+            ]),
+            theme: 'grid',
+            headStyles: { fillColor: [220, 38, 38], textColor: [255, 255, 255], fontSize: 7, halign: 'center' },
+            styles: { fontSize: 7, cellPadding: 2, halign: 'center' },
+            columnStyles: { 
+              0: { cellWidth: 20 },
+              1: { cellWidth: 85, halign: 'left' },
+              2: { cellWidth: 25 },
+              3: { cellWidth: 25 },
+              4: { cellWidth: 25 },
+              5: { cellWidth: 30 },
+              6: { cellWidth: 45 }
+            }
+          });
+          currentY = (doc as any).lastAutoTable.finalY + 10;
         });
-        currentY = (doc as any).lastAutoTable.finalY + 12;
       });
     }
 
