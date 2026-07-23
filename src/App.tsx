@@ -5259,7 +5259,7 @@ function Dashboard() {
               'Quantidade Sugerida': r.suggestedPurchase || 0,
               'Quantidade Desejada': r.desiredQty || 0,
               'Quantidade Aprovada': r.desiredQty || 0,
-              'Origem da Necessidade': r.transferStatusLabel?.includes('Parcial') ? 'Transferência Insuficiente' : r.statusSignal || 'Ruptura',
+              'Origem da Necessidade': r.transferStatusLabel?.includes('Parcial') ? 'Transferência Insuficiente' : (r.originReason || r.statusSignal || 'Ruptura'),
               'Curva': r.curva || '',
               'Status': r.statusSignal || 'Pendente'
             });
@@ -5286,11 +5286,11 @@ function Dashboard() {
       doc.text(`CORTEX - RELATÓRIO DE ${type.toUpperCase()}`, 14, 15);
       doc.setFontSize(8);
       doc.setTextColor(148, 163, 184);
-      doc.text(`GERADO EM: ${new Date().toLocaleString()}`, 14, 21);
+      doc.text(`GERADO EM: ${new Date().toLocaleString('pt-BR')}`, 14, 21);
     };
 
     drawHeader();
-    let currentY = 35;
+    let currentY = 32;
 
     if (isTrans) {
       // Transferências: Agrupar por Núcleo Destino e Núcleo Origem
@@ -5305,47 +5305,56 @@ function Dashboard() {
 
       Object.entries(tGroups).forEach(([dest, sourceMap]) => {
         Object.entries(sourceMap).forEach(([source, groupItems]) => {
-          if (currentY > 170) {
+          if (currentY > 165) {
              doc.addPage();
              drawHeader();
-             currentY = 35;
+             currentY = 32;
           }
 
-          doc.setFontSize(11);
-          doc.setTextColor(16, 185, 129); // brand-green
+          const totalQty = groupItems.reduce((acc, r) => acc + (r.desiredQty || 0), 0);
+
+          // Sub-header for Destination + Source Filial
+          doc.setFillColor(240, 253, 244); // light emerald
+          doc.rect(14, currentY, 269, 8, 'F');
+          doc.setFontSize(10);
+          doc.setTextColor(4, 120, 87); // brand green
           doc.setFont('helvetica', 'bold');
-          doc.text(`FILIAL / NÚCLEO DESTINO: ${dest}  •  ORIGEM: ${source}`, 14, currentY);
+          doc.text(`FILIAL / NÚCLEO DESTINO: ${dest}   |   ORIGEM: ${source}   (${groupItems.length} ${groupItems.length === 1 ? 'item' : 'itens'})`, 18, currentY + 5.5);
           doc.setFont('helvetica', 'normal');
-          currentY += 6;
+          currentY += 10;
 
           autoTable(doc, {
             startY: currentY,
-            head: [['CÓDIGO', 'PRODUTO', 'GRUPO', 'CURVA', 'SALDO ORIGEM', 'SALDO DESTINO', 'DESEJADO', 'STATUS']],
+            head: [['CÓDIGO', 'PRODUTO', 'UN', 'GRUPO', 'CURVA', 'SALDO ORIGEM', 'SALDO DESTINO', 'QTD. DESEJADA', 'STATUS']],
             body: groupItems.map(r => [
               r.cod, 
               r.desc, 
-              r.grupo || '',
-              r.curva || '',
-              r.sourceSaldo || 0, 
-              r.saldo || 0, 
-              r.desiredQty || 0, 
+              expandUnitAbbreviation(r.un),
+              r.grupo || '-',
+              r.curva || '-',
+              (r.sourceSaldo || 0).toLocaleString('pt-BR'), 
+              (r.saldo || 0).toLocaleString('pt-BR'), 
+              (r.desiredQty || 0).toLocaleString('pt-BR'), 
               (r.transferStatusLabel || 'OK').replace('Parcial', 'Parcial').replace('TRANSF. INSUF.', 'Transferência Insuficiente')
             ]),
+            foot: [['TOTAL DA ROTA', `${groupItems.length} itens`, '', '', '', '', '', totalQty.toLocaleString('pt-BR'), '']],
             theme: 'grid',
-            headStyles: { fillColor: [16, 185, 129], textColor: [255, 255, 255], fontSize: 7, halign: 'center' },
+            headStyles: { fillColor: [4, 120, 87], textColor: [255, 255, 255], fontSize: 7, halign: 'center', fontStyle: 'bold' },
+            footStyles: { fillColor: [236, 253, 245], textColor: [4, 120, 87], fontSize: 7, halign: 'center', fontStyle: 'bold' },
             styles: { fontSize: 7, cellPadding: 2, halign: 'center' },
             columnStyles: { 
               0: { cellWidth: 20 },
-              1: { cellWidth: 80, halign: 'left' },
-              2: { cellWidth: 35, halign: 'left' },
-              3: { cellWidth: 15 },
-              4: { cellWidth: 25 },
-              5: { cellWidth: 25 },
-              6: { cellWidth: 25 },
-              7: { cellWidth: 40 }
+              1: { cellWidth: 75, halign: 'left' },
+              2: { cellWidth: 15 },
+              3: { cellWidth: 30, halign: 'left' },
+              4: { cellWidth: 12 },
+              5: { cellWidth: 22 },
+              6: { cellWidth: 22 },
+              7: { cellWidth: 25 },
+              8: { cellWidth: 38 }
             }
           });
-          currentY = (doc as any).lastAutoTable.finalY + 10;
+          currentY = (doc as any).lastAutoTable.finalY + 8;
         });
       });
     } else {
@@ -5361,45 +5370,52 @@ function Dashboard() {
 
       Object.entries(pGroups).forEach(([vendor, branchMap]) => {
         Object.entries(branchMap).forEach(([branch, groupItems]) => {
-          if (currentY > 170) {
+          if (currentY > 165) {
              doc.addPage();
              drawHeader();
-             currentY = 35;
+             currentY = 32;
           }
 
+          const totalQty = groupItems.reduce((acc, r) => acc + (r.desiredQty || 0), 0);
+
+          // Sub-header for Vendor + Filial
+          doc.setFillColor(254, 242, 242); // light red
+          doc.rect(14, currentY, 269, 8, 'F');
           doc.setFontSize(10);
-          doc.setTextColor(220, 38, 38);
+          doc.setTextColor(185, 28, 28); // brand red
           doc.setFont('helvetica', 'bold');
-          doc.text(`FORNECEDOR: ${vendor}  •  FILIAL / NÚCLEO: ${branch}`, 14, currentY);
+          doc.text(`FORNECEDOR: ${vendor}   |   FILIAL / NÚCLEO: ${branch}   (${groupItems.length} ${groupItems.length === 1 ? 'item' : 'itens'})`, 18, currentY + 5.5);
           doc.setFont('helvetica', 'normal');
-          currentY += 6;
+          currentY += 10;
 
           autoTable(doc, {
             startY: currentY,
-            head: [['CÓDIGO', 'PRODUTO', 'FILIAL / NÚCLEO', 'SALDO ATUAL', 'SUGESTÃO', 'QTD. COMPRA', 'ORIGEM NECESSIDADE']],
+            head: [['CÓDIGO', 'PRODUTO', 'UNIDADE', 'SALDO ATUAL', 'SUGESTÃO', 'QTD. COMPRA', 'ORIGEM NECESSIDADE']],
             body: groupItems.map(r => [
               r.cod, 
               r.desc, 
-              r.filial ? r.filial.split(' - ')[0] : 'GERAL', 
-              r.saldo.toLocaleString(), 
-              r.suggestedPurchase.toLocaleString(), 
-              r.desiredQty?.toLocaleString(), 
-              r.transferStatusLabel?.includes('Parcial') ? 'TRANSFERÊNCIA INSUFICIENTE' : r.statusSignal || 'RUPTURA'
+              expandUnitAbbreviation(r.un), 
+              (r.saldo || 0).toLocaleString('pt-BR'), 
+              (r.suggestedPurchase || 0).toLocaleString('pt-BR'), 
+              (r.desiredQty || 0).toLocaleString('pt-BR'), 
+              r.transferStatusLabel?.includes('Parcial') ? 'TRANSFERÊNCIA INSUFICIENTE' : (r.originReason || r.statusSignal || 'RUPTURA')
             ]),
+            foot: [['TOTAL DA FILIAL', `${groupItems.length} itens`, '', '', '', totalQty.toLocaleString('pt-BR'), '']],
             theme: 'grid',
-            headStyles: { fillColor: [220, 38, 38], textColor: [255, 255, 255], fontSize: 7, halign: 'center' },
+            headStyles: { fillColor: [185, 28, 28], textColor: [255, 255, 255], fontSize: 7, halign: 'center', fontStyle: 'bold' },
+            footStyles: { fillColor: [254, 242, 242], textColor: [185, 28, 28], fontSize: 7, halign: 'center', fontStyle: 'bold' },
             styles: { fontSize: 7, cellPadding: 2, halign: 'center' },
             columnStyles: { 
-              0: { cellWidth: 20 },
-              1: { cellWidth: 85, halign: 'left' },
-              2: { cellWidth: 25 },
+              0: { cellWidth: 22 },
+              1: { cellWidth: 95, halign: 'left' },
+              2: { cellWidth: 22 },
               3: { cellWidth: 25 },
               4: { cellWidth: 25 },
               5: { cellWidth: 30 },
-              6: { cellWidth: 45 }
+              6: { cellWidth: 50 }
             }
           });
-          currentY = (doc as any).lastAutoTable.finalY + 10;
+          currentY = (doc as any).lastAutoTable.finalY + 8;
         });
       });
     }
