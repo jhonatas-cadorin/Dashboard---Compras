@@ -1882,6 +1882,51 @@ function InventoryDashboardView({
     return `${cod}-${filial}` in cartItems || Object.keys(cartItems).some(k => k.startsWith(`${cod}-${filial}-`));
   }, [cartItems]);
 
+  const allBranches = useMemo(() => {
+    if (!data?.inventoryRecords) return [];
+    const map = new Map<string, string>();
+    data.inventoryRecords.forEach((ir: any) => {
+      if (!ir.filial) return;
+      const code = ir.filial.split(' - ')[0].trim();
+      if (code && !map.has(code)) {
+        map.set(code, ir.filial);
+      }
+    });
+    return Array.from(map.entries()).map(([code, fullName]) => ({ code, fullName }));
+  }, [data]);
+
+  const transferToNucleus = (item: any, qty: number, destFilialCode: string) => {
+    if (!destFilialCode) return;
+    const sourceFilialCode = item.filial ? item.filial.split(' - ')[0].trim() : '';
+    if (sourceFilialCode === destFilialCode) {
+      alert("O núcleo de destino não pode ser igual ao núcleo de origem.");
+      return;
+    }
+
+    // Encontrar o registro de inventário para a filial de destino ou construir um
+    const destRecord = (data?.inventoryRecords || []).find(
+      (ir: any) => ir.cod === item.cod && ir.filial.split(' - ')[0].trim() === destFilialCode
+    ) || {
+      ...item,
+      filial: `${destFilialCode} - NÚCLEO`,
+      saldo: 0,
+      total_mov: 0
+    };
+
+    const transferQty = qty > 0 ? qty : (item.saldo > 0 ? item.saldo : 1);
+    const cartKey = `${item.cod}-${destRecord.filial}`;
+
+    setCartItems(prev => ({
+      ...prev,
+      [cartKey]: {
+        item: destRecord,
+        qty: transferQty,
+        sourceFilial: item.filial,
+        reason: item.total_mov === 0 ? 'Redistribuição - Item Sem Movimentação' : 'Redistribuição de Estoque'
+      }
+    }));
+  };
+
   const handleConfirmMultiTransfer = () => {
     if (!transferSelection || selectedSources.length === 0) return;
 
@@ -2810,23 +2855,76 @@ function InventoryDashboardView({
                           </div>
                         </div>
 
-                        {/* Transfer Options Pill List */}
-                        {(transferableMap[r.cod] || []).filter(opt => opt.filial !== r.filial.split(' - ')[0] && opt.saldo > 0).length > 0 && (
-                          <div className="mt-6 pt-4 border-t border-brand-border dark:border-white/5">
-                            <span className="text-[8px] font-bold text-brand-text-secondary uppercase tracking-[0.2em] mb-2 block opacity-50">Transferência Recomendada:</span>
-                            <div className="flex flex-wrap gap-1.5">
+                        {/* Transfer Options & Nucleus Destination Selector */}
+                        <div className="mt-4 pt-4 border-t border-brand-border dark:border-white/5 flex flex-col gap-2" onClick={e => e.stopPropagation()}>
+                          {r.total_mov === 0 && (
+                            <div className="px-2.5 py-1 text-[8px] font-black rounded-lg bg-brand-green/10 text-brand-green border border-brand-green/20 flex items-center justify-between gap-1.5">
+                              <span className="flex items-center gap-1.5">
+                                <Package className="w-3 h-3 text-brand-green shrink-0 animate-pulse" />
+                                <span>SEM MOVIMENTAÇÃO ({r.saldo.toLocaleString()} {r.un})</span>
+                              </span>
+                              <span className="text-[7px] bg-brand-green text-white px-1 py-0.5 rounded font-black">SEM GIRO 12M</span>
+                            </div>
+                          )}
+
+                          <div className="flex items-center justify-between">
+                            <span className="text-[8px] font-bold text-brand-text-secondary uppercase tracking-[0.2em] opacity-60 flex items-center gap-1">
+                              <RefreshCcw className="w-2.5 h-2.5 text-brand-green" /> Transferir p/ Núcleo Destino:
+                            </span>
+                          </div>
+
+                          <select
+                            className="w-full bg-brand-bg/60 dark:bg-black/50 border border-brand-border dark:border-white/10 rounded-xl px-2.5 py-1.5 text-[10px] font-black text-brand-text-primary dark:text-white focus:border-brand-green outline-none cursor-pointer hover:border-brand-green/40 transition-all shadow-inner"
+                            defaultValue=""
+                            onChange={(e) => {
+                              if (e.target.value) {
+                                const qty = desiredQtys[`${r.cod}-${r.filial}`] ?? (r.saldo > 0 ? r.saldo : 1);
+                                transferToNucleus(r, qty, e.target.value);
+                                e.target.value = '';
+                              }
+                            }}
+                          >
+                            <option value="" disabled>Escolha o núcleo de destino...</option>
+                            {allBranches
+                              .filter(b => b.code !== r.filial.split(' - ')[0].trim())
+                              .map(b => {
+                                const destInfo = (data?.inventoryRecords || []).find((ir: any) => ir.cod === r.cod && ir.filial.startsWith(b.code));
+                                const destSaldo = destInfo ? destInfo.saldo : 0;
+                                const destMov = destInfo ? destInfo.total_mov : 0;
+                                return (
+                                  <option key={b.code} value={b.code}>
+                                    Núcleo {b.code} - {cleanFilialName(b.fullName)} (Saldo: {destSaldo} | Mov: {destMov})
+                                  </option>
+                                );
+                              })}
+                          </select>
+
+                          {(transferableMap[r.cod] || []).filter(opt => opt.filial !== r.filial.split(' - ')[0] && opt.saldo > 0).length > 0 && (
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              <span className="text-[7px] font-semibold text-brand-text-secondary opacity-50 block w-full">Fontes de estoque na rede:</span>
                               {(transferableMap[r.cod] || [])
                                 .filter(opt => opt.filial !== r.filial.split(' - ')[0] && opt.saldo > 0)
                                 .slice(0, 3)
                                 .map((opt, i) => (
-                                  <div key={i} className={`px-2 py-1 text-[7px] font-black rounded-lg border flex items-center gap-1.5 ${opt.total_mov === 0 ? 'bg-brand-green/10 text-brand-green border border-brand-green/20' : 'bg-brand-blue/5 text-brand-blue border border-brand-blue/10 dark:border-brand-blue/20'}`}>
+                                  <button 
+                                    key={i} 
+                                    onClick={() => {
+                                      addToCart(r, desiredQtys[`${r.cod}-${r.filial}`] ?? r.suggestedPurchase, opt.filial);
+                                    }}
+                                    className={`px-2 py-0.5 text-[7px] font-black rounded-lg border flex items-center gap-1 hover:scale-105 transition-all ${
+                                      opt.total_mov === 0 
+                                        ? 'bg-brand-green/10 text-brand-green border-brand-green/30' 
+                                        : 'bg-brand-blue/10 text-brand-blue border-brand-blue/20'
+                                    }`}
+                                    title="Puxar transferência desta filial"
+                                  >
                                     <MapPin className="w-2.5 h-2.5 opacity-50" />
-                                    {cleanFilialName(opt.filial)} {opt.total_mov === 0 && <span className="text-[6px] px-1 bg-brand-green text-white rounded">SEM GIRO</span>}
-                                  </div>
+                                    {cleanFilialName(opt.filial)} {opt.total_mov === 0 ? '• SM' : `(S:${opt.saldo})`}
+                                  </button>
                                 ))}
                             </div>
-                          </div>
-                        )}
+                          )}
+                        </div>
                       </div>
 
                       {/* Footer Actions */}
@@ -2890,7 +2988,7 @@ function InventoryDashboardView({
                             <th className="px-4 py-4 border-b border-brand-border/10 text-[9px] uppercase font-black tracking-widest text-brand-text-secondary text-center font-mono">Demanda 4m</th>
                             <th className="px-4 py-4 border-b border-brand-border/10 text-[9px] uppercase font-black tracking-widest text-brand-text-secondary text-center font-mono">Sugestão</th>
                             <th className="px-4 py-4 border-b border-brand-border/10 text-[9px] uppercase font-black tracking-widest text-brand-text-secondary text-center font-mono">Qtd. Desejada</th>
-                            <th className="px-4 py-4 border-b border-brand-border/10 text-[9px] uppercase font-black tracking-widest text-brand-text-secondary font-mono text-center">Disponível para Transferência</th>
+                            <th className="px-4 py-4 border-b border-brand-border/10 text-[9px] uppercase font-black tracking-widest text-brand-text-secondary font-mono text-center">Transferência / Núcleos</th>
                           </>
                         )}
                         <th className="px-4 py-4 border-b border-brand-border/10 text-[9px] uppercase font-black tracking-widest text-brand-text-secondary text-center whitespace-nowrap font-mono">Ação</th>
@@ -2958,6 +3056,11 @@ function InventoryDashboardView({
                               </td>
                               <td className="px-4 py-4 text-center">
                                 <div className="font-black text-brand-text-primary text-[12px]">{Math.round(r.total_mov).toLocaleString()}</div>
+                                {r.total_mov === 0 && (
+                                  <span className="text-[7px] font-black text-brand-green bg-brand-green/10 px-1 py-0.5 rounded border border-brand-green/20 uppercase tracking-tight block mt-0.5">
+                                    SEM GIRO
+                                  </span>
+                                )}
                               </td>
                               <td className="px-4 py-4 text-center">
                                 <div className="font-black text-brand-blue text-[13px] tracking-tight">{Math.round(r.totalProjected).toLocaleString()}</div>
@@ -2979,31 +3082,60 @@ function InventoryDashboardView({
                                   })}
                                 />
                               </td>
-                              <td className="px-4 py-4">
-                                <div className="flex flex-wrap gap-1 justify-center max-w-[200px] mx-auto">
-                                  {(transferableMap[r.cod] || [])
-                                    .filter(opt => opt.filial !== r.filial.split(' - ')[0] && opt.saldo > 0)
-                                    .map((opt, i) => {
-                                      const isSelected = cartItems[`${r.cod}-${r.filial}`]?.sourceFilial === opt.filial || cartItems[`${r.cod}-${r.filial}-${opt.filial.split(' - ')[0]}`]?.sourceFilial === opt.filial;
-                                      return (
-                                        <button 
-                                          key={i} 
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            addToCart(r, desiredQtys[`${r.cod}-${r.filial}`] ?? r.suggestedPurchase, opt.filial);
-                                          }}
-                                          className={`px-1.5 py-0.5 text-[7px] font-black rounded border uppercase transition-all ${
-                                            isSelected 
-                                              ? 'bg-brand-green text-white border-brand-green shadow-sm scale-105 z-10' 
-                                              : opt.total_mov === 0 
-                                                ? 'bg-brand-green/10 text-brand-green border-brand-green/20' 
-                                                : 'bg-brand-blue/10 text-brand-blue border-brand-blue/20'
-                                          }`}
-                                        >
-                                          {opt.filial} {opt.total_mov === 0 && '• SM'}
-                                        </button>
-                                      );
-                                    })}
+                              <td className="px-4 py-4" onClick={(e) => e.stopPropagation()}>
+                                <div className="flex flex-col gap-1.5 items-center justify-center max-w-[210px] mx-auto">
+                                  <select
+                                    className="w-full bg-brand-bg/50 dark:bg-black/40 border border-brand-border dark:border-white/10 rounded-lg px-2 py-1 text-[9px] font-black text-brand-text-primary dark:text-white focus:border-brand-green outline-none cursor-pointer transition-all shadow-inner"
+                                    defaultValue=""
+                                    onChange={(e) => {
+                                      if (e.target.value) {
+                                        const qty = desiredQtys[`${r.cod}-${r.filial}`] ?? (r.saldo > 0 ? r.saldo : 1);
+                                        transferToNucleus(r, qty, e.target.value);
+                                        e.target.value = '';
+                                      }
+                                    }}
+                                  >
+                                    <option value="" disabled>Enviar p/ Núcleo...</option>
+                                    {allBranches
+                                      .filter(b => b.code !== r.filial.split(' - ')[0].trim())
+                                      .map(b => {
+                                        const destInfo = (data?.inventoryRecords || []).find((ir: any) => ir.cod === r.cod && ir.filial.startsWith(b.code));
+                                        const destSaldo = destInfo ? destInfo.saldo : 0;
+                                        const destMov = destInfo ? destInfo.total_mov : 0;
+                                        return (
+                                          <option key={b.code} value={b.code}>
+                                            Núcleo {b.code} (S:{destSaldo} | M:{destMov})
+                                          </option>
+                                        );
+                                      })}
+                                  </select>
+
+                                  <div className="flex flex-wrap gap-1 justify-center">
+                                    {(transferableMap[r.cod] || [])
+                                      .filter(opt => opt.filial !== r.filial.split(' - ')[0] && opt.saldo > 0)
+                                      .map((opt, i) => {
+                                        const isSelected = cartItems[`${r.cod}-${r.filial}`]?.sourceFilial === opt.filial || cartItems[`${r.cod}-${r.filial}-${opt.filial.split(' - ')[0]}`]?.sourceFilial === opt.filial;
+                                        return (
+                                          <button 
+                                            key={i} 
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              addToCart(r, desiredQtys[`${r.cod}-${r.filial}`] ?? r.suggestedPurchase, opt.filial);
+                                            }}
+                                            className={`px-1.5 py-0.5 text-[7px] font-black rounded border uppercase transition-all ${
+                                              isSelected 
+                                                ? 'bg-brand-green text-white border-brand-green shadow-sm scale-105 z-10' 
+                                                : opt.total_mov === 0 
+                                                  ? 'bg-brand-green/10 text-brand-green border-brand-green/20' 
+                                                  : 'bg-brand-blue/10 text-brand-blue border-brand-blue/20'
+                                            }`}
+                                            title={`Puxar estoque da filial ${opt.filial}`}
+                                          >
+                                            ← {opt.filial} {opt.total_mov === 0 && '• SM'}
+                                          </button>
+                                        );
+                                      })}
+                                  </div>
                                 </div>
                               </td>
                             </>
@@ -5201,23 +5333,23 @@ function Dashboard() {
     let dataToExport: any[] = [];
 
     if (isTrans) {
-      // Transferências: Agrupar por Núcleo Destino e Núcleo Origem
+      // Transferências: Agrupar por Núcleo Origem (Saída) e depois Núcleo Destino (Entrada)
       const tGroups: Record<string, Record<string, any[]>> = {};
       items.forEach(item => {
         const source = item.sourceFilial ? item.sourceFilial.split(' - ')[0] : 'REDE';
         const dest = item.filial ? item.filial.split(' - ')[0] : 'GERAL';
-        if (!tGroups[dest]) tGroups[dest] = {};
-        if (!tGroups[dest][source]) tGroups[dest][source] = [];
-        tGroups[dest][source].push(item);
+        if (!tGroups[source]) tGroups[source] = {};
+        if (!tGroups[source][dest]) tGroups[source][dest] = [];
+        tGroups[source][dest].push(item);
       });
 
-      Object.entries(tGroups).forEach(([dest, sourceMap]) => {
-        Object.entries(sourceMap).forEach(([source, groupItems]) => {
+      Object.entries(tGroups).forEach(([source, destMap]) => {
+        Object.entries(destMap).forEach(([dest, groupItems]) => {
           groupItems.forEach(r => {
             dataToExport.push({
-              'Núcleo Destino': dest,
-              'Núcleo Origem': source,
-              'Agrupamento': `DESTINO: ${dest} | ORIGEM: ${source}`,
+              'Núcleo Origem (Saída)': source,
+              'Núcleo Destino (Entrada)': dest,
+              'Agrupamento': `SAÍDA (ORIGEM): ${source} | DESTINO: ${dest}`,
               'Código': r.cod,
               'Produto': r.desc,
               'Grupo': r.grupo || '',
@@ -5293,18 +5425,18 @@ function Dashboard() {
     let currentY = 32;
 
     if (isTrans) {
-      // Transferências: Agrupar por Núcleo Destino e Núcleo Origem
+      // Transferências: Agrupar por Núcleo Origem (Saída) e depois Núcleo Destino (Entrada)
       const tGroups: Record<string, Record<string, any[]>> = {};
       items.forEach(item => {
-        const dest = item.filial ? item.filial.split(' - ')[0] : 'GERAL';
         const source = item.sourceFilial ? item.sourceFilial.split(' - ')[0] : 'REDE';
-        if (!tGroups[dest]) tGroups[dest] = {};
-        if (!tGroups[dest][source]) tGroups[dest][source] = [];
-        tGroups[dest][source].push(item);
+        const dest = item.filial ? item.filial.split(' - ')[0] : 'GERAL';
+        if (!tGroups[source]) tGroups[source] = {};
+        if (!tGroups[source][dest]) tGroups[source][dest] = [];
+        tGroups[source][dest].push(item);
       });
 
-      Object.entries(tGroups).forEach(([dest, sourceMap]) => {
-        Object.entries(sourceMap).forEach(([source, groupItems]) => {
+      Object.entries(tGroups).forEach(([source, destMap]) => {
+        Object.entries(destMap).forEach(([dest, groupItems]) => {
           if (currentY > 165) {
              doc.addPage();
              drawHeader();
@@ -5313,13 +5445,13 @@ function Dashboard() {
 
           const totalQty = groupItems.reduce((acc, r) => acc + (r.desiredQty || 0), 0);
 
-          // Sub-header for Destination + Source Filial
+          // Sub-header for Source (Saída) + Destination
           doc.setFillColor(240, 253, 244); // light emerald
           doc.rect(14, currentY, 269, 8, 'F');
           doc.setFontSize(10);
           doc.setTextColor(4, 120, 87); // brand green
           doc.setFont('helvetica', 'bold');
-          doc.text(`FILIAL / NÚCLEO DESTINO: ${dest}   |   ORIGEM: ${source}   (${groupItems.length} ${groupItems.length === 1 ? 'item' : 'itens'})`, 18, currentY + 5.5);
+          doc.text(`NÚCLEO ORIGEM (SAÍDA): ${source}   |   DESTINO: ${dest}   (${groupItems.length} ${groupItems.length === 1 ? 'item' : 'itens'})`, 18, currentY + 5.5);
           doc.setFont('helvetica', 'normal');
           currentY += 10;
 
