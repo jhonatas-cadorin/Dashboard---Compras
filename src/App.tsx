@@ -6569,16 +6569,20 @@ function Dashboard() {
     if (!data) return null;
 
     if ((appMode === 'missing_items')) {
-      const lowerSearch = debouncedSearchTerm?.toLowerCase().trim();
-      const normSearch = lowerSearch ? normalizeString(debouncedSearchTerm) : '';
+      const rawSearch = debouncedSearchTerm?.trim() || '';
+      const isExactContainsSearch = rawSearch.includes('*');
+      const cleanSearchTerm = isExactContainsSearch ? rawSearch.replace(/\*/g, '').trim() : rawSearch;
+
+      const lowerSearch = cleanSearchTerm.toLowerCase();
+      const normSearch = lowerSearch ? normalizeString(cleanSearchTerm) : '';
       
-      const hasExactCodeMatch = normSearch ? enrichedInventoryRecords.some((r: any) => {
+      const hasExactCodeMatch = (!isExactContainsSearch && normSearch) ? enrichedInventoryRecords.some((r: any) => {
         const normCod = r._normCod || normalizeString(r.cod);
         const normCatFab = r._normCatFab || normalizeString(r.num_cat_fab || '');
         return normCod === normSearch || normCatFab === normSearch;
       }) : false;
 
-      const hasExactDescMatch = normSearch ? enrichedInventoryRecords.some((r: any) => {
+      const hasExactDescMatch = (!isExactContainsSearch && normSearch) ? enrichedInventoryRecords.some((r: any) => {
         const normDesc = r._normDesc || normalizeString(r.desc);
         return normDesc === normSearch;
       }) : false;
@@ -6624,7 +6628,32 @@ function Dashboard() {
           const normFab = (r as any)._normFab || normalizeString(r.fab);
           const normGrupo = (r as any)._normGrupo || normalizeString(r.grupo);
           
-          if (hasExactCodeMatch) {
+          const rawCod = String(r.cod || '').toLowerCase();
+          const rawCatFab = String(r.num_cat_fab || '').toLowerCase();
+          const rawDesc = String(r.desc || '').toLowerCase();
+
+          if (isExactContainsSearch) {
+            // When asterisks (* or **) are used, bring ONLY items that contain the word inside code, catalog fab, or description
+            const searchWords = lowerSearch.split(/\s+/).map(w => normalizeString(w)).filter(Boolean);
+            
+            const matchCod = normCod.includes(normSearch) || rawCod.includes(lowerSearch);
+            const matchCatFab = normCatFab.includes(normSearch) || rawCatFab.includes(lowerSearch);
+            const matchDesc = normDesc.includes(normSearch) || rawDesc.includes(lowerSearch);
+            const matchAllWords = searchWords.length > 0 && searchWords.every(w => 
+              normCod.includes(w) || normCatFab.includes(w) || normDesc.includes(w) ||
+              rawCod.includes(w) || rawCatFab.includes(w) || rawDesc.includes(w)
+            );
+
+            if (matchCod || matchCatFab || matchDesc || matchAllWords) {
+              if (normCod === normSearch || normCatFab === normSearch || rawCod === lowerSearch) searchScore = 1000;
+              else if (normDesc === normSearch || rawDesc === lowerSearch) searchScore = 900;
+              else if (normCod.startsWith(normSearch) || normCatFab.startsWith(normSearch)) searchScore = 800;
+              else if (normDesc.startsWith(normSearch)) searchScore = 700;
+              else searchScore = 500;
+            } else {
+              continue; // Exclude items that do NOT contain the enclosed term
+            }
+          } else if (hasExactCodeMatch) {
             if (normCod === normSearch || normCatFab === normSearch) {
               searchScore = 1000;
             } else {
@@ -7147,11 +7176,11 @@ function Dashboard() {
                   <div className="relative group">
                     <input 
                       type="text"
-                      placeholder="Pesquisar por N° Catálogo Fab., Cód. ou Item..."
+                      placeholder="Pesquisar (*palavra* para busca contida)..."
                       className="bg-brand-card dark:bg-zinc-800/50 border border-brand-border dark:border-white/5 rounded-xl pl-10 pr-10 py-2.5 text-[11px] font-black w-[310px] focus:w-[420px] focus:ring-4 focus:ring-brand-blue/10 focus:border-brand-blue/50 outline-none transition-all placeholder:text-brand-text-secondary/50 text-brand-text-primary dark:text-white shadow-soft hover:border-brand-blue/20"
                       value={searchTerm}
                       onChange={e => setSearchTerm(e.target.value)}
-                      title="Pesquise por N° Catálogo do Fabricante, Código do Item ou Descrição da Planilha"
+                      title="Pesquise por N° Catálogo, Código ou Descrição. Use *termo* ou **termo** para filtrar estritamente itens que contêm o termo."
                     />
                     <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-text-secondary opacity-50 group-focus-within:text-brand-blue group-focus-within:opacity-100 transition-all" />
                     {searchTerm && (
