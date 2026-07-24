@@ -23,6 +23,7 @@ export interface PurchaseRecord {
 
 export interface InventoryRecord {
   cod: string;
+  num_cat_fab?: string;
   desc: string;
   grupo: string;
   fab: string;

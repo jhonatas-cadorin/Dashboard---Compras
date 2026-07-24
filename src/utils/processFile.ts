@@ -8,12 +8,12 @@ import { PurchaseRecord, DashboardData, AppMode } from '../types';
 
 const MONTH_NAMES = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
 
-function normalizeString(val: any): string {
+export function normalizeString(val: any): string {
   return String(val || '')
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[-/.\s]/g, "")
+    .replace(/[^a-z0-9]/g, "")
     .trim();
 }
 
@@ -192,6 +192,7 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
     custo: -1,
     preco: -1,
     lead_time: -1,
+    num_cat_fab: -1,
     months: []
   };
 
@@ -245,6 +246,7 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
         if (c.includes('custo') || c === 'vlr custo' || c === 'unit cost') colIdx.custo = idx;
         if (c.includes('preço') || c.includes('preco') || c === 'vlr unit' || c === 'unit price' || c === 'vlr venda') colIdx.preco = idx;
         if (c.includes('lead time') || c.includes('leadtime') || c.includes('prazo') || c.includes('entrega')) colIdx.lead_time = idx;
+        if (c.includes('catálog') || c.includes('catalog') || c.includes('cat_fab') || c.includes('num_cat') || c.includes('cat. fab') || c.includes('cat.fab') || c.includes('part number') || c.includes('partnumber') || c.includes('p/n') || c.includes('p_n') || c.includes('cód. fab') || c.includes('cod. fab') || c.includes('código do fabricante') || c.includes('codigo do fabricante') || c.includes('ref. fab') || c.includes('referência do fabricante') || c.includes('referencia do fabricante')) colIdx.num_cat_fab = idx;
 
         // Monthly detection using new robust parseMonthAndYear
         const parsed = parseMonthAndYear(c);
@@ -371,8 +373,11 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
     const capital_parado = (isExcesso || isSemGiro) ? saldo * (custo || preco || 0) : 0;
     const saldoTransferivel = Math.max(0, saldo - total_mov);
 
+    const num_cat_fab = colIdx.num_cat_fab >= 0 ? String(rawRow[colIdx.num_cat_fab] || '').trim() : '';
+
     const record = {
       cod,
+      num_cat_fab,
       desc: String(rawRow[colIdx.desc] || '').trim(),
       curva: String(rawRow[colIdx.abc] || '').trim().toUpperCase().slice(0, 1),
       filial: String(rawRow[colIdx.filial] || 'GERAL').trim().toUpperCase(),
@@ -396,6 +401,7 @@ async function processInventoryFile(file: File, sheetData: any[][]): Promise<Das
       t1, t2, t3, t4,
       mesesByYear,
       _normCod: normalizeString(cod),
+      _normCatFab: normalizeString(num_cat_fab),
       _normDesc: normalizeString(String(rawRow[colIdx.desc] || '')),
       _normGrupo: normalizeString(String(rawRow[colIdx.grupo] || 'OUTROS')),
       _normFab: normalizeString(colIdx.fab >= 0 ? String(rawRow[colIdx.fab] || 'N/I') : 'N/I')

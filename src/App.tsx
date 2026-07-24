@@ -534,9 +534,35 @@ async function carregarPlanilha(): Promise<DashboardData | null> {
 
        const custo = parseNum(r.custo || r.vlr_custo || r.preco_custo || r.valor_custo);
        const preco = parseNum(r.preco || r.vlr_venda || r.tabela || r.valor_venda);
+       const num_cat_fab = String(
+         r.n_do_catalogo_do_fabricante ||
+         r.num_cat_fab ||
+         r.n_cat_fab ||
+         r.num_cat ||
+         r.n_cat ||
+         r.cat_fab ||
+         r.cat_fabricante ||
+         r.catalogo ||
+         r.num_catalogo ||
+         r.catalogo_fabricante ||
+         r.num_cat_fabricante ||
+         r.num_catalogo_fabricante ||
+         r.cod_fabricante ||
+         r.ref_fabricante ||
+         r.part_number ||
+         r.partnumber ||
+         r.p_n ||
+         r.cod_fab ||
+         r.codigo_fabricante ||
+         r.referencia_fabricante ||
+         r.n_catalogo ||
+         r.col_7 ||
+         ''
+       ).trim();
 
        return {
          cod: cod || `S-${Math.random().toString(36).substr(2, 5)}`,
+         num_cat_fab,
          desc,
          curva: String(r.curva_abc || r.curva || r.abc || r.classe || '').toUpperCase().slice(0, 1),
          filial: String(r.nome_da_filial || r.filial || r.unidade || r.loja || 'GERAL').toUpperCase(),
@@ -674,7 +700,7 @@ function normalizeString(str: string): string {
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[-/.\s]/g, "")
+    .replace(/[^a-z0-9]/g, "")
     .trim();
 }
 
@@ -802,7 +828,11 @@ function ItemDetailModal({
         const destFullName = branchObj?.fullName || `${code} - NÚCLEO`;
 
         const destRecord = (data?.inventoryRecords || []).find(
-          (ir: any) => ir.cod === item.cod && ir.filial.startsWith(code)
+          (ir: any) => ir.cod === item.cod && (
+            ir.filial.startsWith(code) || 
+            getBranchId(ir.filial) === getBranchId(code) || 
+            cleanFilialName(ir.filial) === cleanFilialName(destFullName)
+          )
         ) || {
           ...item,
           filial: destFullName,
@@ -812,7 +842,10 @@ function ItemDetailModal({
 
         const cartKey = `${item.cod}-${destRecord.filial}-${sourceCode}`;
         newEntries[cartKey] = {
-          item: destRecord,
+          item: {
+            ...destRecord,
+            sourceSaldo: item.saldo
+          },
           qty: dataBranch.qty,
           sourceFilial: item.filial,
           reason: item.total_mov === 0 ? 'Transferência - Item Sem Movimentação' : 'Transferência entre Unidades'
@@ -832,9 +865,6 @@ function ItemDetailModal({
     alert(`✅ Transferência adicionada com sucesso!\n\nItem: #${item.cod} - ${item.desc}\nOrigem: ${cleanFilialName(item.filial)}\n\nDestinos:\n• ${successDetails.join('\n• ')}\n\nOs itens foram adicionados à lista de transferências.`);
     
     onClose();
-    if (onOpenTransfers) {
-      onOpenTransfers();
-    }
   };
 
   const networkOptions = useMemo(() => {
@@ -996,6 +1026,14 @@ function ItemDetailModal({
             <div className="flex-1 min-w-0">
               <div className="flex flex-wrap items-center gap-3 mb-0.5">
                 <span className="text-[9px] font-black text-brand-text-secondary opacity-40 uppercase tracking-widest font-mono">CODE: #{item.cod}</span>
+                {item.num_cat_fab && (
+                  <>
+                    <div className="h-1 w-1 rounded-full bg-brand-border hidden sm:block" />
+                    <span className="text-[9px] font-black text-brand-blue uppercase tracking-widest font-mono bg-brand-blue/10 px-2 py-0.5 rounded border border-brand-blue/20">
+                      CATÁLOGO FAB: {item.num_cat_fab}
+                    </span>
+                  </>
+                )}
                 <div className="h-1 w-1 rounded-full bg-brand-border hidden sm:block" />
                 <span className="text-[9px] font-black text-brand-blue uppercase tracking-widest font-mono">
                   {cleanFilialName(item.filial)}
@@ -1345,7 +1383,11 @@ function ItemDetailModal({
                 const currentBranchQty = sel.qty;
 
                 const destRec = (data?.inventoryRecords || []).find(
-                  (ir: any) => ir.cod === item.cod && ir.filial.startsWith(b.code)
+                  (ir: any) => ir.cod === item.cod && (
+                    ir.filial.startsWith(b.code) || 
+                    getBranchId(ir.filial) === getBranchId(b.code) || 
+                    cleanFilialName(ir.filial) === cleanFilialName(b.fullName)
+                  )
                 );
                 const destSaldo = destRec ? destRec.saldo : 0;
 
@@ -1424,7 +1466,7 @@ function ItemDetailModal({
                 disabled={countSelected === 0 || totalAllocated <= 0}
                 className="w-full sm:w-auto px-6 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest text-white bg-brand-green hover:brightness-110 active:scale-95 transition-all shadow-lg shadow-brand-green/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                <RefreshCcw className="w-4 h-4" /> Adicionar e Ir para Transferências
+                <RefreshCcw className="w-4 h-4" /> Adicionar para Transferência
               </button>
             </div>
           </div>
@@ -2462,19 +2504,33 @@ function InventoryDashboardView({
       const srcFilial = value.sourceFilial ? getBranchId(value.sourceFilial) : myFilial;
       return srcFilial !== myFilial;
     }).map(([key, value]) => {
-      const myFilialId = getBranchId(value.item.filial);
-      const options = (transferableMap[value.item.cod] || [])
-        .filter((opt: any) => getBranchId(opt.filial) !== myFilialId && opt.saldo > 0)
-        .sort((a: any, b: any) => b.saldo - a.saldo);
-      
-      const chosenSource = value.sourceFilial || options[0]?.filial || '?';
-      const sourceData = options.find(o => getBranchId(o.filial) === getBranchId(chosenSource));
+      const destFilialId = getBranchId(value.item.filial);
+      const chosenSource = value.sourceFilial || '?';
+      const srcFilialId = getBranchId(chosenSource);
+
+      const srcRecord = (data?.inventoryRecords || []).find(
+        (ir: any) => ir.cod === value.item.cod && (
+          getBranchId(ir.filial) === srcFilialId ||
+          cleanFilialName(ir.filial) === cleanFilialName(chosenSource)
+        )
+      );
+
+      const destRecord = (data?.inventoryRecords || []).find(
+        (ir: any) => ir.cod === value.item.cod && (
+          getBranchId(ir.filial) === destFilialId ||
+          cleanFilialName(ir.filial) === cleanFilialName(value.item.filial)
+        )
+      );
+
+      const realSourceSaldo = value.item.sourceSaldo ?? srcRecord?.saldo ?? 0;
+      const realDestSaldo = destRecord?.saldo ?? value.item.saldo ?? 0;
 
       return { 
         ...value.item, 
-        desiredQty: value.qty,
+        saldo: realDestSaldo,
         sourceFilial: chosenSource,
-        sourceSaldo: sourceData?.saldo || 0,
+        sourceSaldo: realSourceSaldo,
+        desiredQty: value.qty,
         originReason: value.reason,
         cartKey: key
       };
@@ -3642,6 +3698,8 @@ function InventoryDashboardView({
                               <tr>
                                 <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10">Item</th>
                                 <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10 text-center">Origem</th>
+                                <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10 text-center font-mono">Saldo Origem</th>
+                                <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10 text-center font-mono">Saldo Destino</th>
                                 <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10 text-center">Qtd</th>
                                 <th className="px-4 py-2 text-[8px] font-black uppercase tracking-widest text-brand-text-secondary border-b border-brand-border/10 text-center">Ação</th>
                               </tr>
@@ -3663,6 +3721,12 @@ function InventoryDashboardView({
                                     >
                                       {r.sourceFilial} <Search className="w-2.5 h-2.5" />
                                     </button>
+                                  </td>
+                                  <td className="px-4 py-3 text-center font-mono font-black text-[11px] text-brand-text-primary dark:text-white">
+                                    {(r.sourceSaldo || 0).toLocaleString('pt-BR')}
+                                  </td>
+                                  <td className="px-4 py-3 text-center font-mono font-black text-[11px] text-brand-blue">
+                                    {(r.saldo || 0).toLocaleString('pt-BR')}
                                   </td>
                                   <td className="px-4 py-3 text-center">
                                     <div className="flex items-center justify-center gap-1">
@@ -4025,6 +4089,11 @@ function InventoryDashboardView({
                                 <span className="font-mono text-[9px] text-brand-text-secondary font-medium opacity-40">
                                   #{r.cod}
                                 </span>
+                                {r.num_cat_fab && (
+                                  <span className="font-mono text-[9px] font-semibold text-brand-blue bg-brand-blue/10 px-1.5 py-0.5 rounded border border-brand-blue/20" title="N° Catálogo Fabricante">
+                                    Cat: {r.num_cat_fab}
+                                  </span>
+                                )}
                               </div>
                               <h4 className="text-[14px] font-bold text-brand-text-primary leading-snug break-words h-auto group-hover:text-brand-blue transition-colors select-all" title={r.desc}>
                                 {r.desc}
@@ -5253,7 +5322,11 @@ function TransferModal({
         const destFullName = branchObj?.fullName || `${code} - NÚCLEO`;
 
         const destRecord = (data?.inventoryRecords || []).find(
-          (ir: any) => ir.cod === item.cod && ir.filial.startsWith(code)
+          (ir: any) => ir.cod === item.cod && (
+            ir.filial.startsWith(code) || 
+            getBranchId(ir.filial) === getBranchId(code) || 
+            cleanFilialName(ir.filial) === cleanFilialName(destFullName)
+          )
         ) || {
           ...item,
           filial: destFullName,
@@ -5263,7 +5336,10 @@ function TransferModal({
 
         const cartKey = `${item.cod}-${destRecord.filial}-${sourceCode}`;
         newEntries[cartKey] = {
-          item: destRecord,
+          item: {
+            ...destRecord,
+            sourceSaldo: item.saldo
+          },
           qty: dataBranch.qty,
           sourceFilial: item.filial,
           reason: item.total_mov === 0 ? 'Transferência - Item Sem Movimentação' : 'Transferência entre Unidades'
@@ -5281,9 +5357,6 @@ function TransferModal({
     alert(`✅ Transferência adicionada com sucesso!\n\nItem: #${item.cod} - ${item.desc}\nOrigem: ${cleanFilialName(item.filial)}\n\nDestinos:\n• ${successDetails.join('\n• ')}\n\nOs itens foram adicionados à lista de transferências.`);
     
     onClose();
-    if (onOpenTransfers) {
-      onOpenTransfers();
-    }
   };
 
   return (
@@ -5457,7 +5530,11 @@ function TransferModal({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[280px] overflow-y-auto pr-1 custom-scrollbar">
               {availableDestinations.map((b) => {
                 const destRecord = (data?.inventoryRecords || []).find(
-                  (ir: any) => ir.cod === item.cod && ir.filial.startsWith(b.code)
+                  (ir: any) => ir.cod === item.cod && (
+                    ir.filial.startsWith(b.code) || 
+                    getBranchId(ir.filial) === getBranchId(b.code) || 
+                    cleanFilialName(ir.filial) === cleanFilialName(b.fullName)
+                  )
                 );
                 const destSaldo = destRecord?.saldo || 0;
                 const destMov = destRecord?.total_mov || 0;
@@ -6371,9 +6448,6 @@ function Dashboard() {
         }
       }
 
-      // Exclude items with no stock and no movement from intelligence
-      if (r.saldo <= 0 && r.total_mov === 0) return null;
-
       const avg = r.total_mov / 12;
       let last3 = 0, prev3 = 0;
       for (let i = 1; i <= 3; i++) {
@@ -6466,6 +6540,7 @@ function Dashboard() {
       return { 
         ...r, 
         _normCod: normalizeString(r.cod),
+        _normCatFab: normalizeString(r.num_cat_fab || ''),
         _normDesc: normalizeString(r.desc),
         _normFab: normalizeString(r.fab),
         _normGrupo: normalizeString(r.grupo),
@@ -6499,7 +6574,8 @@ function Dashboard() {
       
       const hasExactCodeMatch = normSearch ? enrichedInventoryRecords.some((r: any) => {
         const normCod = r._normCod || normalizeString(r.cod);
-        return normCod === normSearch;
+        const normCatFab = r._normCatFab || normalizeString(r.num_cat_fab || '');
+        return normCod === normSearch || normCatFab === normSearch;
       }) : false;
 
       const hasExactDescMatch = normSearch ? enrichedInventoryRecords.some((r: any) => {
@@ -6543,12 +6619,13 @@ function Dashboard() {
         let searchScore = 0;
         if (normSearch) {
           const normCod = (r as any)._normCod || normalizeString(r.cod);
+          const normCatFab = (r as any)._normCatFab || normalizeString(r.num_cat_fab || '');
           const normDesc = (r as any)._normDesc || normalizeString(r.desc);
           const normFab = (r as any)._normFab || normalizeString(r.fab);
           const normGrupo = (r as any)._normGrupo || normalizeString(r.grupo);
           
           if (hasExactCodeMatch) {
-            if (normCod === normSearch) {
+            if (normCod === normSearch || normCatFab === normSearch) {
               searchScore = 1000;
             } else {
               continue;
@@ -6560,11 +6637,11 @@ function Dashboard() {
               continue;
             }
           } else {
-            // 1º → Correspondência exata do “N° do item”
-            if (normCod === normSearch) searchScore = 1000;
-            // 2º → Correspondência parcial do “N° do item”
-            else if (normCod.startsWith(normSearch)) searchScore = 800;
-            else if (normCod.includes(normSearch)) searchScore = 600;
+            // 1º → Correspondência exata do “N° do item” ou “N° Catálogo Fabricante”
+            if (normCod === normSearch || normCatFab === normSearch) searchScore = 1000;
+            // 2º → Correspondência parcial do “N° do item” ou “N° Catálogo Fabricante”
+            else if (normCod.startsWith(normSearch) || normCatFab.startsWith(normSearch)) searchScore = 800;
+            else if (normCod.includes(normSearch) || normCatFab.includes(normSearch)) searchScore = 600;
             // 3º → Correspondência exata da “Descrição do item”
             else if (normDesc === normSearch) searchScore = 400;
             // 4º → Correspondência parcial da “Descrição do item”
@@ -7070,16 +7147,18 @@ function Dashboard() {
                   <div className="relative group">
                     <input 
                       type="text"
-                      placeholder="Buscar código ou descrição..."
-                      className="bg-brand-card dark:bg-zinc-800/50 border border-brand-border dark:border-white/5 rounded-xl px-10 py-2.5 text-[11px] font-black w-[280px] focus:w-[350px] focus:ring-4 focus:ring-brand-blue/10 focus:border-brand-blue/50 outline-none transition-all placeholder:text-brand-text-secondary/50 text-brand-text-primary dark:text-white shadow-soft hover:border-brand-blue/20"
+                      placeholder="Pesquisar por N° Catálogo Fab., Cód. ou Item..."
+                      className="bg-brand-card dark:bg-zinc-800/50 border border-brand-border dark:border-white/5 rounded-xl pl-10 pr-10 py-2.5 text-[11px] font-black w-[310px] focus:w-[420px] focus:ring-4 focus:ring-brand-blue/10 focus:border-brand-blue/50 outline-none transition-all placeholder:text-brand-text-secondary/50 text-brand-text-primary dark:text-white shadow-soft hover:border-brand-blue/20"
                       value={searchTerm}
                       onChange={e => setSearchTerm(e.target.value)}
+                      title="Pesquise por N° Catálogo do Fabricante, Código do Item ou Descrição da Planilha"
                     />
                     <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-text-secondary opacity-50 group-focus-within:text-brand-blue group-focus-within:opacity-100 transition-all" />
                     {searchTerm && (
                       <button 
                         onClick={() => setSearchTerm('')}
                         className="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-black/10 dark:hover:bg-white/10 rounded-full transition-colors"
+                        title="Limpar busca"
                       >
                         <X className="w-3 h-3 text-brand-text-secondary" />
                       </button>
