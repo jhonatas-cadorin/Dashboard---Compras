@@ -689,7 +689,10 @@ function ItemDetailModal({
   addToCart,
   removeFromCart,
   isItemInCart,
-  cartItems
+  cartItems,
+  allBranches = [],
+  setCartItems,
+  onOpenTransfers
 }: { 
   item: any, 
   data: DashboardData, 
@@ -700,8 +703,140 @@ function ItemDetailModal({
   addToCart: (item: any, qty: number, sourceFilial?: string, forcePurchase?: boolean, autoSplit?: boolean) => void,
   removeFromCart: (key: string) => void,
   isItemInCart: (cod: string, filial: string) => boolean,
-  cartItems: any
+  cartItems: any,
+  allBranches?: { code: string, fullName: string }[],
+  setCartItems?: React.Dispatch<React.SetStateAction<Record<string, any>>>,
+  onOpenTransfers?: () => void
 }) {
+  const sourceCode = item.filial ? item.filial.split(' - ')[0].trim() : '';
+
+  const computedAllBranches = useMemo(() => {
+    if (allBranches && allBranches.length > 0) return allBranches;
+    if (!data?.inventoryRecords) return [];
+    const map = new Map<string, string>();
+    data.inventoryRecords.forEach((ir: any) => {
+      if (!ir.filial) return;
+      const code = ir.filial.split(' - ')[0].trim();
+      if (code && !map.has(code)) {
+        map.set(code, ir.filial);
+      }
+    });
+    return Array.from(map.entries()).map(([code, fullName]) => ({ code, fullName }));
+  }, [allBranches, data]);
+
+  const availableDestinations = useMemo(() => {
+    return computedAllBranches.filter(b => b.code !== sourceCode);
+  }, [computedAllBranches, sourceCode]);
+
+  const [globalTransferQty, setGlobalTransferQty] = useState<number>(() => {
+    return item.suggestedPurchase > 0 ? item.suggestedPurchase : (item.saldo > 0 ? item.saldo : 1);
+  });
+
+  const [destSelections, setDestSelections] = useState<Record<string, { selected: boolean, qty: number }>>(() => {
+    const initial: Record<string, { selected: boolean, qty: number }> = {};
+    const defaultQty = item.suggestedPurchase > 0 ? item.suggestedPurchase : (item.saldo > 0 ? item.saldo : 1);
+    availableDestinations.forEach((b, idx) => {
+      initial[b.code] = { selected: false, qty: defaultQty };
+    });
+    return initial;
+  });
+
+  const handleToggleBranch = (code: string) => {
+    setDestSelections(prev => {
+      const current = prev[code] || { selected: false, qty: 0 };
+      const nextSelected = !current.selected;
+      const defaultQty = globalTransferQty > 0 ? globalTransferQty : 1;
+      return {
+        ...prev,
+        [code]: {
+          selected: nextSelected,
+          qty: nextSelected ? (current.qty > 0 ? current.qty : defaultQty) : 0
+        }
+      };
+    });
+  };
+
+  const handleBranchQtyChange = (code: string, newQty: number) => {
+    setDestSelections(prev => ({
+      ...prev,
+      [code]: {
+        selected: newQty > 0 ? true : (prev[code]?.selected || false),
+        qty: Math.max(0, newQty)
+      }
+    }));
+  };
+
+  const handleDistributeEqually = () => {
+    const selectedCodes = Object.entries(destSelections).filter(([_, v]) => (v as any).selected).map(([k]) => k);
+    if (selectedCodes.length === 0) return;
+    const share = Math.max(1, Math.floor(globalTransferQty / selectedCodes.length));
+    setDestSelections(prev => {
+      const updated = { ...prev };
+      selectedCodes.forEach(code => {
+        updated[code] = { selected: true, qty: share };
+      });
+      return updated;
+    });
+  };
+
+  const totalAllocated = (Object.values(destSelections) as { selected: boolean, qty: number }[]).reduce((acc, v) => acc + (v.selected ? Number(v.qty || 0) : 0), 0);
+  const countSelected = Object.values(destSelections).filter((v: any) => v.selected && v.qty > 0).length;
+
+  const handleConfirmTransfer = () => {
+    if (countSelected === 0) {
+      alert("Selecione pelo menos uma filial de destino e defina a quantidade.");
+      return;
+    }
+
+    if (totalAllocated <= 0) {
+      alert("A quantidade total a transferir deve ser maior que zero.");
+      return;
+    }
+
+    const newEntries: Record<string, any> = {};
+    const successDetails: string[] = [];
+
+    Object.entries(destSelections).forEach(([code, dataBranch]: [string, any]) => {
+      if (dataBranch.selected && dataBranch.qty > 0) {
+        const branchObj = availableDestinations.find(b => b.code === code);
+        const destFullName = branchObj?.fullName || `${code} - NÚCLEO`;
+
+        const destRecord = (data?.inventoryRecords || []).find(
+          (ir: any) => ir.cod === item.cod && ir.filial.startsWith(code)
+        ) || {
+          ...item,
+          filial: destFullName,
+          saldo: 0,
+          total_mov: 0
+        };
+
+        const cartKey = `${item.cod}-${destRecord.filial}-${sourceCode}`;
+        newEntries[cartKey] = {
+          item: destRecord,
+          qty: dataBranch.qty,
+          sourceFilial: item.filial,
+          reason: item.total_mov === 0 ? 'Transferência - Item Sem Movimentação' : 'Transferência entre Unidades'
+        };
+
+        successDetails.push(`${dataBranch.qty} ${item.un || 'UN'} → Núcleo ${code}`);
+      }
+    });
+
+    if (setCartItems) {
+      setCartItems(prev => ({
+        ...prev,
+        ...newEntries
+      }));
+    }
+
+    alert(`✅ Transferência adicionada com sucesso!\n\nItem: #${item.cod} - ${item.desc}\nOrigem: ${cleanFilialName(item.filial)}\n\nDestinos:\n• ${successDetails.join('\n• ')}\n\nOs itens foram adicionados à lista de transferências.`);
+    
+    onClose();
+    if (onOpenTransfers) {
+      onOpenTransfers();
+    }
+  };
+
   const networkOptions = useMemo(() => {
     const rawOptions = (data.inventoryRecords || [])
       .filter(r => r.cod === item.cod && r.filial.split(' - ')[0] !== item.filial.split(' - ')[0]);
@@ -1173,6 +1308,126 @@ function ItemDetailModal({
               </motion.div>
             )}
           </AnimatePresence>
+
+          {/* Options for multi-branch transfer in product history modal */}
+          <div className="p-6 rounded-2xl bg-brand-green/[0.03] dark:bg-brand-green/[0.05] border border-brand-green/20 space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-brand-green/20 text-brand-green rounded-xl flex items-center justify-center border border-brand-green/30 shrink-0">
+                  <RefreshCcw className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-[11px] font-black text-brand-green uppercase tracking-[0.2em] font-mono">
+                    SOLICITAR TRANSFERÊNCIA ENTRE FILIAIS
+                  </h4>
+                  <p className="text-[10px] font-bold text-brand-text-secondary opacity-80">
+                    Escolha as filiais de destino e quantidades para enviar a partir de <strong className="text-brand-text-primary dark:text-white">{cleanFilialName(item.filial)}</strong>:
+                  </p>
+                </div>
+              </div>
+
+              {countSelected > 0 && (
+                <button
+                  type="button"
+                  onClick={handleDistributeEqually}
+                  className="px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-wider bg-brand-green/10 text-brand-green hover:bg-brand-green hover:text-white border border-brand-green/30 transition-all self-start sm:self-auto cursor-pointer"
+                >
+                  Distribuir Igualmente ({globalTransferQty})
+                </button>
+              )}
+            </div>
+
+            {/* Branch Selection Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+              {availableDestinations.map((b) => {
+                const sel = destSelections[b.code] || { selected: false, qty: 0 };
+                const isSelected = sel.selected;
+                const currentBranchQty = sel.qty;
+
+                const destRec = (data?.inventoryRecords || []).find(
+                  (ir: any) => ir.cod === item.cod && ir.filial.startsWith(b.code)
+                );
+                const destSaldo = destRec ? destRec.saldo : 0;
+
+                return (
+                  <div
+                    key={b.code}
+                    onClick={() => handleToggleBranch(b.code)}
+                    className={`p-3.5 rounded-xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+                      isSelected
+                        ? 'border-brand-green bg-brand-green/10 dark:bg-brand-green/20 shadow-md ring-1 ring-brand-green/50'
+                        : 'border-brand-border/40 dark:border-white/10 bg-white/50 dark:bg-black/20 hover:border-brand-green/40'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => {}} // Driven by parent div click
+                          className="w-4 h-4 rounded text-brand-green focus:ring-brand-green accent-brand-green cursor-pointer"
+                        />
+                        <span className="text-xs font-black uppercase text-brand-text-primary dark:text-white">
+                          Núcleo {b.code}
+                        </span>
+                      </div>
+                      <span className="text-[9px] font-mono text-brand-text-secondary">
+                        Saldo: <b className="text-brand-text-primary dark:text-white">{destSaldo}</b>
+                      </span>
+                    </div>
+
+                    {isSelected && (
+                      <div
+                        className="flex items-center justify-between pt-2 border-t border-brand-green/20"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <span className="text-[9px] font-black text-brand-green uppercase tracking-widest">Qtd a mandar:</span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleBranchQtyChange(b.code, currentBranchQty - 1)}
+                            className="w-6 h-6 rounded bg-brand-green/20 text-brand-green font-black text-xs hover:bg-brand-green hover:text-white transition-all flex items-center justify-center cursor-pointer"
+                          >
+                            -
+                          </button>
+                          <input
+                            type="number"
+                            min={1}
+                            value={currentBranchQty}
+                            onChange={(e) => handleBranchQtyChange(b.code, parseInt(e.target.value) || 0)}
+                            className="w-14 text-center text-xs font-black bg-white dark:bg-black/60 border border-brand-green/40 rounded-lg py-0.5 outline-none focus:ring-1 focus:ring-brand-green text-brand-text-primary dark:text-white"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleBranchQtyChange(b.code, currentBranchQty + 1)}
+                            className="w-6 h-6 rounded bg-brand-green/20 text-brand-green font-black text-xs hover:bg-brand-green hover:text-white transition-all flex items-center justify-center cursor-pointer"
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Action Bar inside Transfer Section */}
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-3 border-t border-brand-green/20">
+              <div className="text-xs text-brand-text-secondary font-bold">
+                Total selecionado: <b className="text-brand-green font-black text-sm">{totalAllocated} {item.un || 'UN'}</b> para <b className="text-brand-text-primary dark:text-white">{countSelected} filial(ais)</b>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleConfirmTransfer}
+                disabled={countSelected === 0 || totalAllocated <= 0}
+                className="w-full sm:w-auto px-6 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest text-white bg-brand-green hover:brightness-110 active:scale-95 transition-all shadow-lg shadow-brand-green/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <RefreshCcw className="w-4 h-4" /> Adicionar e Ir para Transferências
+              </button>
+            </div>
+          </div>
         </div>
 
         <div className="px-8 py-4 border-t border-brand-border bg-black/[0.02] dark:bg-black/20 flex flex-wrap items-center justify-between gap-4">
@@ -1614,6 +1869,7 @@ function InventoryDashboardView({
   const viewType = propViewType !== undefined ? propViewType : localViewType;
   const setViewType = propSetViewType !== undefined ? propSetViewType : setLocalViewType;
   const [cartItems, setCartItems] = useState<Record<string, { item: any, qty: number, sourceFilial?: string, reason?: string }>>({});
+  const [transferModalItem, setTransferModalItem] = useState<{ item: any, qty?: number } | null>(null);
   const [transferSelection, setTransferSelection] = useState<{ item: any, qty: number, options: any[] } | null>(null);
   const [separationModal, setSeparationModal] = useState<{ isOpen: boolean, destBranch: string, email: string, phone: string } | null>(null);
   const [selectedSources, setSelectedSources] = useState<string[]>([]);
@@ -2867,37 +3123,18 @@ function InventoryDashboardView({
                             </div>
                           )}
 
-                          <div className="flex items-center justify-between">
-                            <span className="text-[8px] font-bold text-brand-text-secondary uppercase tracking-[0.2em] opacity-60 flex items-center gap-1">
-                              <RefreshCcw className="w-2.5 h-2.5 text-brand-green" /> Transferir p/ Núcleo Destino:
-                            </span>
-                          </div>
-
-                          <select
-                            className="w-full bg-brand-bg/60 dark:bg-black/50 border border-brand-border dark:border-white/10 rounded-xl px-2.5 py-1.5 text-[10px] font-black text-brand-text-primary dark:text-white focus:border-brand-green outline-none cursor-pointer hover:border-brand-green/40 transition-all shadow-inner"
-                            defaultValue=""
-                            onChange={(e) => {
-                              if (e.target.value) {
-                                const qty = desiredQtys[`${r.cod}-${r.filial}`] ?? (r.saldo > 0 ? r.saldo : 1);
-                                transferToNucleus(r, qty, e.target.value);
-                                e.target.value = '';
-                              }
+                          <button 
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const qty = desiredQtys[`${r.cod}-${r.filial}`] ?? (r.saldo > 0 ? r.saldo : 1);
+                              setTransferModalItem({ item: r, qty });
                             }}
+                            className="w-full py-2 bg-brand-green/10 hover:bg-brand-green text-brand-green hover:text-white border border-brand-green/30 rounded-xl font-black text-[10px] uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer active:scale-95 mt-1"
                           >
-                            <option value="" disabled>Escolha o núcleo de destino...</option>
-                            {allBranches
-                              .filter(b => b.code !== r.filial.split(' - ')[0].trim())
-                              .map(b => {
-                                const destInfo = (data?.inventoryRecords || []).find((ir: any) => ir.cod === r.cod && ir.filial.startsWith(b.code));
-                                const destSaldo = destInfo ? destInfo.saldo : 0;
-                                const destMov = destInfo ? destInfo.total_mov : 0;
-                                return (
-                                  <option key={b.code} value={b.code}>
-                                    Núcleo {b.code} - {cleanFilialName(b.fullName)} (Saldo: {destSaldo} | Mov: {destMov})
-                                  </option>
-                                );
-                              })}
-                          </select>
+                            <RefreshCcw className="w-3.5 h-3.5" />
+                            Transferir p/ Filiais
+                          </button>
 
                           {(transferableMap[r.cod] || []).filter(opt => opt.filial !== r.filial.split(' - ')[0] && opt.saldo > 0).length > 0 && (
                             <div className="flex flex-wrap gap-1 mt-1">
@@ -3084,31 +3321,18 @@ function InventoryDashboardView({
                               </td>
                               <td className="px-4 py-4" onClick={(e) => e.stopPropagation()}>
                                 <div className="flex flex-col gap-1.5 items-center justify-center max-w-[210px] mx-auto">
-                                  <select
-                                    className="w-full bg-brand-bg/50 dark:bg-black/40 border border-brand-border dark:border-white/10 rounded-lg px-2 py-1 text-[9px] font-black text-brand-text-primary dark:text-white focus:border-brand-green outline-none cursor-pointer transition-all shadow-inner"
-                                    defaultValue=""
-                                    onChange={(e) => {
-                                      if (e.target.value) {
-                                        const qty = desiredQtys[`${r.cod}-${r.filial}`] ?? (r.saldo > 0 ? r.saldo : 1);
-                                        transferToNucleus(r, qty, e.target.value);
-                                        e.target.value = '';
-                                      }
+                                  <button 
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      const qty = desiredQtys[`${r.cod}-${r.filial}`] ?? (r.saldo > 0 ? r.saldo : 1);
+                                      setTransferModalItem({ item: r, qty });
                                     }}
+                                    className="px-3 py-1.5 bg-brand-green/10 hover:bg-brand-green text-brand-green hover:text-white border border-brand-green/30 rounded-lg font-black text-[9px] uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-sm active:scale-95"
                                   >
-                                    <option value="" disabled>Enviar p/ Núcleo...</option>
-                                    {allBranches
-                                      .filter(b => b.code !== r.filial.split(' - ')[0].trim())
-                                      .map(b => {
-                                        const destInfo = (data?.inventoryRecords || []).find((ir: any) => ir.cod === r.cod && ir.filial.startsWith(b.code));
-                                        const destSaldo = destInfo ? destInfo.saldo : 0;
-                                        const destMov = destInfo ? destInfo.total_mov : 0;
-                                        return (
-                                          <option key={b.code} value={b.code}>
-                                            Núcleo {b.code} (S:{destSaldo} | M:{destMov})
-                                          </option>
-                                        );
-                                      })}
-                                  </select>
+                                    <RefreshCcw className="w-3 h-3" />
+                                    Transferir
+                                  </button>
 
                                   <div className="flex flex-wrap gap-1 justify-center">
                                     {(transferableMap[r.cod] || [])
@@ -4291,6 +4515,20 @@ function InventoryDashboardView({
       </div>
 
           <AnimatePresence>
+        {transferModalItem && (
+          <TransferModal
+            item={transferModalItem.item}
+            initialQty={transferModalItem.qty}
+            data={data}
+            allBranches={allBranches}
+            onClose={() => setTransferModalItem(null)}
+            setCartItems={setCartItems}
+            onOpenTransfers={() => {
+              setActiveModule('transfers');
+              setViewModeInternal('transfers');
+            }}
+          />
+        )}
         {selectedItem && (
           <ItemDetailModal
             item={selectedItem}
@@ -4303,6 +4541,12 @@ function InventoryDashboardView({
             removeFromCart={removeFromCart}
             isItemInCart={isItemInCart}
             cartItems={cartItems}
+            allBranches={allBranches}
+            setCartItems={setCartItems}
+            onOpenTransfers={() => {
+              if (setActiveModule) setActiveModule('transfers');
+              setViewModeInternal('transfers');
+            }}
           />
         )}
         {separationModal?.isOpen && (
@@ -4909,6 +5153,423 @@ function FinanceDashboardView({
           </motion.div>
         )}
       </AnimatePresence>
+    </div>
+  );
+}
+
+function TransferModal({
+  item,
+  initialQty,
+  data,
+  allBranches,
+  onClose,
+  setCartItems,
+  onOpenTransfers
+}: {
+  item: any,
+  initialQty?: number,
+  data: DashboardData | null,
+  allBranches: { code: string, fullName: string }[],
+  onClose: () => void,
+  setCartItems: React.Dispatch<React.SetStateAction<Record<string, any>>>,
+  onOpenTransfers?: () => void
+}) {
+  const sourceCode = item.filial ? item.filial.split(' - ')[0].trim() : '';
+  const availableDestinations = useMemo(() => {
+    return allBranches.filter(b => b.code !== sourceCode);
+  }, [allBranches, sourceCode]);
+
+  const [globalQty, setGlobalQty] = useState<number>(() => {
+    if (initialQty && initialQty > 0) return initialQty;
+    return item.saldo > 0 ? item.saldo : 1;
+  });
+
+  const [destSelections, setDestSelections] = useState<Record<string, { selected: boolean, qty: number }>>(() => {
+    const initial: Record<string, { selected: boolean, qty: number }> = {};
+    const defaultQty = initialQty || (item.saldo > 0 ? item.saldo : 1);
+    availableDestinations.forEach((b, idx) => {
+      initial[b.code] = { selected: idx === 0, qty: idx === 0 ? defaultQty : 0 };
+    });
+    return initial;
+  });
+
+  const handleToggleBranch = (code: string) => {
+    setDestSelections(prev => {
+      const current = prev[code] || { selected: false, qty: 0 };
+      const nextSelected = !current.selected;
+      return {
+        ...prev,
+        [code]: {
+          selected: nextSelected,
+          qty: nextSelected ? (current.qty > 0 ? current.qty : globalQty) : 0
+        }
+      };
+    });
+  };
+
+  const handleBranchQtyChange = (code: string, newQty: number) => {
+    setDestSelections(prev => ({
+      ...prev,
+      [code]: {
+        selected: newQty > 0 ? true : (prev[code]?.selected || false),
+        qty: Math.max(0, newQty)
+      }
+    }));
+  };
+
+  const handleDistributeEqually = () => {
+    const selectedCodes = Object.entries(destSelections).filter(([_, v]) => (v as any).selected).map(([k]) => k);
+    if (selectedCodes.length === 0) return;
+    const share = Math.max(1, Math.floor(globalQty / selectedCodes.length));
+    setDestSelections(prev => {
+      const updated = { ...prev };
+      selectedCodes.forEach(code => {
+        updated[code] = { selected: true, qty: share };
+      });
+      return updated;
+    });
+  };
+
+  const totalAllocated = (Object.values(destSelections) as { selected: boolean, qty: number }[]).reduce((acc, v) => acc + (v.selected ? Number(v.qty || 0) : 0), 0);
+  const countSelected = Object.values(destSelections).filter((v: any) => v.selected && v.qty > 0).length;
+
+  const handleConfirmTransfer = () => {
+    if (countSelected === 0) {
+      alert("Selecione pelo menos uma filial de destino e defina a quantidade.");
+      return;
+    }
+
+    if (totalAllocated <= 0) {
+      alert("A quantidade total a transferir deve ser maior que zero.");
+      return;
+    }
+
+    const newEntries: Record<string, any> = {};
+    const successDetails: string[] = [];
+
+    Object.entries(destSelections).forEach(([code, dataBranch]: [string, any]) => {
+      if (dataBranch.selected && dataBranch.qty > 0) {
+        const branchObj = availableDestinations.find(b => b.code === code);
+        const destFullName = branchObj?.fullName || `${code} - NÚCLEO`;
+
+        const destRecord = (data?.inventoryRecords || []).find(
+          (ir: any) => ir.cod === item.cod && ir.filial.startsWith(code)
+        ) || {
+          ...item,
+          filial: destFullName,
+          saldo: 0,
+          total_mov: 0
+        };
+
+        const cartKey = `${item.cod}-${destRecord.filial}-${sourceCode}`;
+        newEntries[cartKey] = {
+          item: destRecord,
+          qty: dataBranch.qty,
+          sourceFilial: item.filial,
+          reason: item.total_mov === 0 ? 'Transferência - Item Sem Movimentação' : 'Transferência entre Unidades'
+        };
+
+        successDetails.push(`${dataBranch.qty} ${item.un || 'UN'} → Núcleo ${code}`);
+      }
+    });
+
+    setCartItems(prev => ({
+      ...prev,
+      ...newEntries
+    }));
+
+    alert(`✅ Transferência adicionada com sucesso!\n\nItem: #${item.cod} - ${item.desc}\nOrigem: ${cleanFilialName(item.filial)}\n\nDestinos:\n• ${successDetails.join('\n• ')}\n\nOs itens foram adicionados à lista de transferências.`);
+    
+    onClose();
+    if (onOpenTransfers) {
+      onOpenTransfers();
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-md animate-in fade-in duration-200">
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.95, y: 20 }}
+        className="bg-white dark:bg-[#121827] w-full max-w-3xl rounded-[2.5rem] border border-brand-border/40 dark:border-white/10 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+      >
+        {/* Header */}
+        <div className="p-6 bg-brand-green/10 border-b border-brand-border/30 dark:border-white/10 flex justify-between items-start">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 bg-brand-green/20 rounded-2xl flex items-center justify-center border border-brand-green/30 shadow-inner">
+              <RefreshCcw className="w-6 h-6 text-brand-green" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 mb-1">
+                <span className="px-2 py-0.5 bg-brand-green text-white text-[9px] font-black rounded uppercase tracking-wider">
+                  SOLICITAR TRANSFERÊNCIA
+                </span>
+                <span className="text-xs font-mono text-brand-text-secondary font-black">#{item.cod}</span>
+              </div>
+              <h3 className="text-lg font-black text-brand-text-primary dark:text-white uppercase tracking-tight line-clamp-1">
+                {item.desc}
+              </h3>
+              <p className="text-[10px] text-brand-text-secondary font-bold uppercase tracking-widest mt-0.5">
+                Origem do Produto: <span className="text-brand-green font-black">{cleanFilialName(item.filial)}</span>
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-2 hover:bg-black/10 dark:hover:bg-white/10 rounded-xl transition-all text-brand-text-secondary"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Content Body */}
+        <div className="p-6 overflow-y-auto space-y-6 flex-1 custom-scrollbar">
+          {/* Origin Item Overview Banner */}
+          <div className="p-4 bg-brand-bg/60 dark:bg-black/40 rounded-2xl border border-brand-border/30 dark:border-white/5 grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
+            <div>
+              <span className="text-[8px] font-black text-brand-text-secondary uppercase tracking-widest opacity-60">Saldo na Origem</span>
+              <div className="text-lg font-black text-brand-text-primary dark:text-white mt-0.5">{item.saldo?.toLocaleString() || 0} {item.un || 'UN'}</div>
+            </div>
+            <div>
+              <span className="text-[8px] font-black text-brand-text-secondary uppercase tracking-widest opacity-60">Giro 12M Origem</span>
+              <div className="text-lg font-black text-brand-text-primary dark:text-white mt-0.5">{Math.round(item.total_mov || 0).toLocaleString()} {item.un || 'UN'}</div>
+            </div>
+            <div>
+              <span className="text-[8px] font-black text-brand-text-secondary uppercase tracking-widest opacity-60">Fabricante</span>
+              <div className="text-xs font-black text-brand-text-primary dark:text-white truncate mt-1">{item.fab || 'N/I'}</div>
+            </div>
+            <div>
+              <span className="text-[8px] font-black text-brand-text-secondary uppercase tracking-widest opacity-60">Movimentação</span>
+              <div className="mt-1">
+                {item.total_mov === 0 ? (
+                  <span className="px-2 py-0.5 bg-brand-green/20 text-brand-green text-[9px] font-black rounded border border-brand-green/30 uppercase tracking-widest">
+                    SEM MOVIMENTAÇÃO
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 bg-brand-blue/20 text-brand-blue text-[9px] font-black rounded border border-brand-blue/30 uppercase tracking-widest">
+                    COM GIRO
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Preset Global Quantity Adjustment */}
+          <div className="bg-white dark:bg-black/20 p-5 rounded-2xl border border-brand-border/30 dark:border-white/5 space-y-3">
+            <div className="flex justify-between items-center">
+              <label className="text-[10px] font-black text-brand-text-secondary uppercase tracking-widest flex items-center gap-2">
+                <Package className="w-3.5 h-3.5 text-brand-green" /> 1. DIGITE OU AJUSTE A QUANTIDADE A TRANSFERIR
+              </label>
+              <span className="text-[9px] font-bold text-brand-text-secondary opacity-60">
+                Estoque disponível: {item.saldo} {item.un || 'UN'}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <div className="flex items-center border border-brand-border dark:border-white/10 rounded-2xl overflow-hidden bg-brand-bg/40 dark:bg-black/40">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = Math.max(1, globalQty - 1);
+                    setGlobalQty(next);
+                  }}
+                  className="px-4 py-2.5 hover:bg-black/5 dark:hover:bg-white/10 font-black text-brand-green text-sm transition-all"
+                >
+                  -
+                </button>
+                <input
+                  type="number"
+                  min={1}
+                  value={globalQty}
+                  onChange={(e) => setGlobalQty(Math.max(1, parseInt(e.target.value) || 1))}
+                  className="w-20 text-center font-black text-sm bg-transparent outline-none text-brand-text-primary dark:text-white"
+                />
+                <button
+                  type="button"
+                  onClick={() => setGlobalQty(globalQty + 1)}
+                  className="px-4 py-2.5 hover:bg-black/5 dark:hover:bg-white/10 font-black text-brand-green text-sm transition-all"
+                >
+                  +
+                </button>
+              </div>
+
+              {/* Quick Presets */}
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => setGlobalQty(1)}
+                  className="px-3 py-1.5 text-[9px] font-black rounded-xl bg-black/5 dark:bg-white/5 hover:bg-brand-green/20 hover:text-brand-green border border-brand-border/20 transition-all uppercase"
+                >
+                  1 UN
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setGlobalQty(5)}
+                  className="px-3 py-1.5 text-[9px] font-black rounded-xl bg-black/5 dark:bg-white/5 hover:bg-brand-green/20 hover:text-brand-green border border-brand-border/20 transition-all uppercase"
+                >
+                  5 UN
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setGlobalQty(10)}
+                  className="px-3 py-1.5 text-[9px] font-black rounded-xl bg-black/5 dark:bg-white/5 hover:bg-brand-green/20 hover:text-brand-green border border-brand-border/20 transition-all uppercase"
+                >
+                  10 UN
+                </button>
+                {item.saldo > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setGlobalQty(Math.max(1, Math.floor(item.saldo / 2)))}
+                      className="px-3 py-1.5 text-[9px] font-black rounded-xl bg-brand-green/10 text-brand-green border border-brand-green/20 hover:bg-brand-green hover:text-white transition-all uppercase"
+                    >
+                      50% ({Math.max(1, Math.floor(item.saldo / 2))})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setGlobalQty(item.saldo)}
+                      className="px-3 py-1.5 text-[9px] font-black rounded-xl bg-brand-green/10 text-brand-green border border-brand-green/20 hover:bg-brand-green hover:text-white transition-all uppercase"
+                    >
+                      Tudo ({item.saldo})
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Destination Filiais Selector */}
+          <div className="space-y-3">
+            <div className="flex justify-between items-center">
+              <label className="text-[10px] font-black text-brand-text-secondary uppercase tracking-widest flex items-center gap-2">
+                <MapPin className="w-3.5 h-3.5 text-brand-green" /> 2. ESCOLHA PARA QUAIS FILIAIS MANDAR
+              </label>
+              <button
+                type="button"
+                onClick={handleDistributeEqually}
+                className="text-[9px] font-black text-brand-green hover:underline uppercase tracking-wider flex items-center gap-1 cursor-pointer"
+              >
+                <RefreshCcw className="w-2.5 h-2.5" /> Dividir igualmente
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[280px] overflow-y-auto pr-1 custom-scrollbar">
+              {availableDestinations.map((b) => {
+                const destRecord = (data?.inventoryRecords || []).find(
+                  (ir: any) => ir.cod === item.cod && ir.filial.startsWith(b.code)
+                );
+                const destSaldo = destRecord?.saldo || 0;
+                const destMov = destRecord?.total_mov || 0;
+                const isSelected = destSelections[b.code]?.selected || false;
+                const currentBranchQty = destSelections[b.code]?.qty || 0;
+
+                return (
+                  <div
+                    key={b.code}
+                    onClick={() => handleToggleBranch(b.code)}
+                    className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+                      isSelected
+                        ? 'bg-brand-green/10 border-brand-green shadow-md dark:shadow-brand-green/5'
+                        : 'bg-brand-bg/40 dark:bg-black/30 border-brand-border/30 dark:border-white/5 hover:border-brand-green/40'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => {}}
+                          className="w-4 h-4 rounded text-brand-green focus:ring-brand-green accent-brand-green cursor-pointer"
+                        />
+                        <div>
+                          <div className="text-[11px] font-black text-brand-text-primary dark:text-white uppercase leading-tight">
+                            Núcleo {b.code} - {cleanFilialName(b.fullName)}
+                          </div>
+                          <div className="flex items-center gap-2 mt-1">
+                            <span className="text-[9px] font-bold text-brand-text-secondary opacity-70">
+                              Saldo Destino: <b className="text-brand-text-primary dark:text-white">{destSaldo} {item.un || 'UN'}</b>
+                            </span>
+                            <span className="text-[9px] font-bold text-brand-text-secondary opacity-70">
+                              • Giro: <b className="text-brand-text-primary dark:text-white">{Math.round(destMov)}</b>
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Demand Badges */}
+                      {destMov > 0 && destSaldo === 0 && (
+                        <span className="px-2 py-0.5 bg-brand-red/20 text-brand-red text-[8px] font-black rounded border border-brand-red/30 uppercase tracking-widest shrink-0">
+                          🔥 ALTA DEMANDA
+                        </span>
+                      )}
+                      {destMov > 0 && destSaldo > 0 && (
+                        <span className="px-2 py-0.5 bg-brand-blue/20 text-brand-blue text-[8px] font-black rounded border border-brand-blue/30 uppercase tracking-widest shrink-0">
+                          COM GIRO
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Quantity for this specific branch */}
+                    {isSelected && (
+                      <div className="flex items-center justify-between pt-2 border-t border-brand-green/20" onClick={e => e.stopPropagation()}>
+                        <span className="text-[9px] font-black text-brand-green uppercase tracking-widest">Qtd a mandar:</span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleBranchQtyChange(b.code, currentBranchQty - 1)}
+                            className="w-6 h-6 rounded bg-brand-green/20 text-brand-green font-black text-xs hover:bg-brand-green hover:text-white transition-all flex items-center justify-center"
+                          >
+                            -
+                          </button>
+                          <input
+                            type="number"
+                            min={1}
+                            value={currentBranchQty}
+                            onChange={(e) => handleBranchQtyChange(b.code, parseInt(e.target.value) || 0)}
+                            className="w-14 text-center text-xs font-black bg-white dark:bg-black/60 border border-brand-green/40 rounded-lg py-0.5 outline-none focus:ring-1 focus:ring-brand-green text-brand-text-primary dark:text-white"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleBranchQtyChange(b.code, currentBranchQty + 1)}
+                            className="w-6 h-6 rounded bg-brand-green/20 text-brand-green font-black text-xs hover:bg-brand-green hover:text-white transition-all flex items-center justify-center"
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        {/* Modal Footer */}
+        <div className="p-6 bg-black/[0.03] dark:bg-black/40 border-t border-brand-border/30 dark:border-white/10 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="text-xs text-brand-text-secondary font-bold">
+            Total a enviar: <b className="text-brand-green font-black text-sm">{totalAllocated} {item.un || 'UN'}</b> para <b className="text-brand-text-primary dark:text-white">{countSelected} filial(ais)</b>
+          </div>
+
+          <div className="flex items-center gap-3 w-full sm:w-auto">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-5 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest text-brand-text-secondary hover:bg-black/5 dark:hover:bg-white/5 transition-all border border-brand-border/20 flex-1 sm:flex-initial cursor-pointer"
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirmTransfer}
+              className="px-6 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest text-white bg-brand-green hover:brightness-110 active:scale-95 transition-all shadow-lg shadow-brand-green/20 flex items-center justify-center gap-2 flex-1 sm:flex-initial cursor-pointer"
+            >
+              <RefreshCcw className="w-4 h-4" /> Confirmar Transferência
+            </button>
+          </div>
+        </div>
+      </motion.div>
     </div>
   );
 }
